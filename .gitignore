@@ -1,0 +1,54 @@
+# Keil MDK-ARM
+*.uvguix*
+*.bak
+*.ddk
+*.edk
+*.lst
+*.lnp
+*.mpf
+*.mpj
+*.obj
+*.omf
+*.plg
+*.rpt
+*.tmp
+*.__i
+*._ia
+*.crf
+*.d
+*.o
+*.browse
+DebugConfig/
+RTE/
+Listings/
+Objects/
+
+# Build outputs
+*.axf
+*.bin
+*.elf
+*.hex
+*.map
+*.htm
+*.lnp
+*.sct
+
+# IAR EWARM
+*.ewt
+*.dep
+settings/
+Debug/
+Release/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# STM32CubeMX generated (keep .ioc)
+.mxproject
