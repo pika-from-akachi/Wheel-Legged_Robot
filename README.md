@@ -1,8 +1,9 @@
 # Wheel-Legged Robot Control System | 轮足机器人控制系统
 
 [![Platform](https://img.shields.io/badge/Platform-STM32F407-blue.svg)](https://www.st.com/en/microcontrollers-microprocessors/stm32f407-417.html)
+[![Framework](https://img.shields.io/badge/Framework-STM32CubeMX_6.15.0-green.svg)](https://www.st.com/en/development-tools/stm32cubemx.html)
 [![Language](https://img.shields.io/badge/Language-C-orange.svg)](https://en.wikipedia.org/wiki/C_(programming_language))
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **English** | [中文](#中文文档)
 
@@ -10,15 +11,15 @@
 
 ## Overview
 
-This project implements the embedded control system for a wheel-legged robot, designed for the 2026 Mingyue Class. The system is based on STM32F407IGHx microcontroller and supports multiple motor control modes through CAN and UART communication interfaces.
+This project implements the embedded control system for a wheel-legged robot, developed for the **2026 Mingyue Class**. The system is based on the STM32F407IGHx microcontroller and supports multiple motor types through CAN and UART communication interfaces.
 
 ### Key Features
 
-- **Dual Motor Driver Support**: EL05 (CAN) and M0601C (UART) motor drivers
-- **Multiple Control Modes**: MIT mode, Position, Velocity, and Current control
-- **Real-time Communication**: CAN 2.0 extended frames @ 500Kbps, UART @ 115200bps
+- **Multi-Motor Support**: EL05 (CAN extended frame), M1502E (CAN standard frame), M0601C (UART)
+- **Multiple Control Modes**: MIT mode, Position, Velocity, Current control
+- **Real-time Communication**: CAN 2.0 @ 500Kbps, UART @ 115200bps with DMA
 - **STM32 HAL Framework**: Built with STM32CubeMX generated code
-- **Modular Architecture**: Easy to extend and maintain
+- **Modular Architecture**: Independent driver modules for easy integration
 
 ---
 
@@ -29,31 +30,42 @@ This project implements the embedded control system for a wheel-legged robot, de
 | Component | Specification |
 |-----------|---------------|
 | MCU | STM32F407IGHx (UFBGA176 package) |
-| System Clock | 168 MHz |
+| Core | ARM Cortex-M4 @ 168 MHz with FPU |
 | CAN Interface | CAN1 (PD0: RX, PD1: TX) |
+| UART Interface | USART1 (PB7: RX, PA9: TX) with DMA |
 | Debug Interface | SWD (PA13: SWDIO, PA14: SWCLK) |
 | External Oscillator | 12 MHz HSE |
 
 ### Supported Motors
 
-#### EL05 Quasi-Direct-Drive Motor (CAN)
+#### EL05 Quasi-Direct-Drive Motor (CAN Extended Frame)
 
 | Parameter | Value |
 |-----------|-------|
-| Rated Voltage | 48V DC |
+| Rated Voltage | 48V DC (15V-60V range) |
 | Rated Torque | 1.8 N·m |
-| Peak Torque | 6 N·m |
+| Peak Torque | 6 N·m (5s duration) |
 | No-load Speed | 430 rpm |
 | Gear Ratio | 9:1 |
-| Communication | CAN 2.0 Extended Frame @ 1Mbps |
+| Communication | CAN 2.0 Extended Frame @ 500Kbps |
+| Control Modes | MIT, Position (PP/CSP), Velocity, Current |
+
+#### M1502E Motor (CAN Standard Frame)
+
+| Parameter | Value |
+|-----------|-------|
+| Communication | CAN 2.0 Standard Frame @ 500Kbps |
+| Control Modes | Velocity mode |
+| ID Range | 1-4 (configurable via CAN) |
 
 #### M0601C Motor (UART)
 
 | Parameter | Value |
 |-----------|-------|
-| Communication | UART @ 115200 bps |
+| Communication | UART @ 115200 bps, 8N1 |
 | Frame Length | 10 bytes (with CRC-8/MAXIM) |
 | Control Modes | Current, Speed, Position |
+| ID Range | 1-4 |
 
 ---
 
@@ -61,18 +73,18 @@ This project implements the embedded control system for a wheel-legged robot, de
 
 ```
 Wheel-Legged_Robot/
-├── Core/                          # Main application code
-│   ├── Inc/                       # Header files
+├── Core/                              # Main application code
+│   ├── Inc/                           # Header files
 │   │   ├── main.h
 │   │   ├── can.h
 │   │   └── gpio.h
-│   └── Src/                       # Source files
-│       ├── main.c                 # Main entry point
-│       ├── can.c                  # CAN initialization & M1502E driver
-│       └── gpio.c                 # GPIO configuration
+│   └── Src/                           # Source files
+│       ├── main.c                     # Main entry point
+│       ├── can.c                      # CAN init & M1502E driver
+│       └── gpio.c                     # GPIO configuration
 │
-├── Motor_Drivers/                 # Motor driver modules
-│   ├── EL05_MOTOR_DRIVE/          # EL05 CAN motor driver
+├── Motor_Drivers/                     # Motor driver modules
+│   ├── EL05_MOTOR_DRIVE/              # EL05 CAN motor driver
 │   │   ├── Core/
 │   │   │   ├── Inc/
 │   │   │   │   ├── el05_motor.h       # EL05 driver API
@@ -83,7 +95,7 @@ Wheel-Legged_Robot/
 │   │   │       └── main_example.c     # Usage examples
 │   │   └── EL05电机驱动使用指南.md     # Chinese documentation
 │   │
-│   └── M0601C_DRIVE/              # M0601C UART motor driver
+│   └── M0601C_DRIVE/                  # M0601C UART motor driver
 │       ├── Core/
 │       │   ├── Inc/
 │       │   │   └── motor_driver.h     # M0601C driver API
@@ -91,19 +103,19 @@ Wheel-Legged_Robot/
 │       │       └── motor_driver.c     # M0601C implementation
 │       └── *.md                       # Documentation files
 │
-├── Drivers/                       # STM32 HAL & CMSIS libraries
-├── MDK-ARM/                       # Keil MDK project files
-├── EWARM/                         # IAR EWARM project files
-└── WheelRobot.ioc                 # STM32CubeMX configuration
+├── Drivers/                           # STM32 HAL & CMSIS libraries
+├── MDK-ARM/                           # Keil MDK project files
+├── EWARM/                             # IAR EWARM project files
+└── WheelRobot.ioc                     # STM32CubeMX configuration
 ```
 
 ---
 
 ## Quick Start
 
-### 1. Hardware Setup
+### 1. Hardware Connection
 
-**EL05 Motor Connection:**
+**EL05 Motor (CAN Extended Frame):**
 ```
 EL05 Motor          STM32F407
 ─────────────────────────────
@@ -115,11 +127,22 @@ GND          ───►   GND
 Note: Add 120Ω termination resistor at both ends of CAN bus
 ```
 
-**M0601C Motor Connection:**
+**M1502E Motor (CAN Standard Frame):**
+```
+M1502E Motor        STM32F407
+─────────────────────────────
+CAN_H        ───►   CAN_H (PD1)
+CAN_L        ───►   CAN_L (PD0)
+GND          ───►   GND
+
+Note: Shares the same CAN bus with EL05
+```
+
+**M0601C Motor (UART):**
 ```
 M0601C Motor        STM32F407
 ─────────────────────────────
-TX           ───►   USART1_RX (PA10)
+TX           ───►   USART1_RX (PB7)
 RX           ───►   USART1_TX (PA9)
 GND          ───►   GND
 ```
@@ -145,7 +168,6 @@ GND          ───►   GND
 ```c
 #include "el05_motor.h"
 
-// Motor handle
 EL05_MotorHandle_t motor1;
 
 int main(void) {
@@ -175,6 +197,30 @@ int main(void) {
     while (1) {
         EL05_MitControl(&motor1, &cmd);
         HAL_Delay(10);  // 100Hz control rate
+    }
+}
+```
+
+**M1502E Motor Example:**
+
+```c
+#include "can.h"
+
+int main(void) {
+    HAL_Init();
+    SystemClock_Config();
+    MX_GPIO_Init();
+    MX_CAN1_Init();
+
+    // Switch to velocity mode
+    M1502E_SetSpeedMode();
+    HAL_Delay(100);
+
+    // Set motor velocity (RPM)
+    M1502E_SetVelocity(30);  // 30 RPM
+
+    while (1) {
+        // Main loop
     }
 }
 ```
@@ -209,7 +255,7 @@ int main(void) {
 
 ## API Reference
 
-### EL05 Motor Driver (CAN)
+### EL05 Motor Driver (CAN Extended Frame)
 
 | Function | Description |
 |----------|-------------|
@@ -222,8 +268,19 @@ int main(void) {
 | `EL05_PositionControl(motor, pos, vel_limit)` | Position control |
 | `EL05_VelocityControl(motor, vel, cur_limit)` | Velocity control |
 | `EL05_CurrentControl(motor, cur)` | Current control |
+| `EL05_SetZeroPosition(motor)` | Set mechanical zero |
+| `EL05_WriteParam(motor, addr, value)` | Write parameter |
+| `EL05_ReadParam(motor, addr)` | Read parameter |
 | `EL05_GetFeedback(motor)` | Get feedback data |
 | `EL05_CheckOnline(motor, timeout)` | Check motor online status |
+
+### M1502E Motor Driver (CAN Standard Frame)
+
+| Function | Description |
+|----------|-------------|
+| `M1502E_SetSpeedMode()` | Switch motor to velocity mode |
+| `M1502E_SetVelocity(rpm)` | Set motor velocity (RPM) |
+| `M1502E_Config_ID(id)` | Set motor ID (1-8) |
 
 ### M0601C Motor Driver (UART)
 
@@ -285,9 +342,10 @@ Output Torque = Kp × (p_des - p_actual) + Kd × (v_des - v_actual) + t_ff
 ### General Safety
 
 - Always check motor connections before powering on
-- Ensure proper CAN termination (120Ω)
+- Ensure proper CAN termination (120Ω at both ends)
 - Monitor motor temperature during operation
 - Start with low gains and increase gradually
+- Never exceed rated voltage or current limits
 
 ---
 
@@ -299,6 +357,8 @@ Output Torque = Kp × (p_des - p_actual) + Kd × (v_des - v_actual) + t_ff
 | Motor oscillating | High gains | Reduce Kp and Kd values |
 | CAN communication failed | Baud rate mismatch | Verify 500Kbps setting |
 | Over-temperature | High load | Reduce load or duty cycle |
+| UART no response | Wrong pins | Check PB7(RX)/PA9(TX) |
+| CRC error | Signal noise | Check cable shielding |
 
 ---
 
@@ -314,7 +374,7 @@ Output Torque = Kp × (p_des - p_actual) + Kd × (v_des - v_actual) + t_ff
 ## References
 
 - [EL05 Motor User Manual](Motor_Drivers/EL05_MOTOR_DRIVE/EL05电机驱动使用指南.md)
-- [STM32F407 Reference Manual](https://www.st.com/resource/en/reference_manual/dm00031051.pdf)
+- [STM32F407 Reference Manual (RM0090)](https://www.st.com/resource/en/reference_manual/dm00031051.pdf)
 - [CAN Protocol Specification](https://www.can-cia.org/)
 
 ---
@@ -343,15 +403,15 @@ This project is developed for educational purposes as part of the 2026 Mingyue C
 
 ## 项目概述
 
-本项目实现了轮足机器人的嵌入式控制系统，专为2026年明月班设计。系统基于STM32F407IGHx微控制器，通过CAN和UART通信接口支持多种电机控制模式。
+本项目实现了轮足机器人的嵌入式控制系统，专为**2026年明月班**设计。系统基于STM32F407IGHx微控制器，通过CAN和UART通信接口支持多种电机类型。
 
 ### 主要特性
 
-- **双电机驱动支持**：EL05（CAN）和M0601C（UART）电机驱动器
+- **多电机支持**：EL05（CAN扩展帧）、M1502E（CAN标准帧）、M0601C（UART）
 - **多种控制模式**：MIT模式、位置控制、速度控制、电流控制
-- **实时通信**：CAN 2.0扩展帧 @ 500Kbps，UART @ 115200bps
+- **实时通信**：CAN 2.0 @ 500Kbps，UART @ 115200bps（DMA模式）
 - **STM32 HAL框架**：基于STM32CubeMX生成的代码
-- **模块化架构**：易于扩展和维护
+- **模块化架构**：独立驱动模块，易于集成
 
 ---
 
@@ -362,31 +422,42 @@ This project is developed for educational purposes as part of the 2026 Mingyue C
 | 组件 | 规格 |
 |------|------|
 | MCU | STM32F407IGHx (UFBGA176封装) |
-| 系统时钟 | 168 MHz |
+| 内核 | ARM Cortex-M4 @ 168 MHz，带FPU |
 | CAN接口 | CAN1 (PD0: RX, PD1: TX) |
+| UART接口 | USART1 (PB7: RX, PA9: TX)，带DMA |
 | 调试接口 | SWD (PA13: SWDIO, PA14: SWCLK) |
 | 外部晶振 | 12 MHz HSE |
 
 ### 支持的电机
 
-#### EL05 准直驱电机（CAN）
+#### EL05 准直驱电机（CAN扩展帧）
 
 | 参数 | 数值 |
 |------|------|
-| 额定电压 | 48V DC |
+| 额定电压 | 48V DC（15V-60V范围） |
 | 额定扭矩 | 1.8 N·m |
-| 峰值扭矩 | 6 N·m |
+| 峰值扭矩 | 6 N·m（持续5秒） |
 | 空载转速 | 430 rpm |
 | 减速比 | 9:1 |
-| 通信方式 | CAN 2.0扩展帧 @ 1Mbps |
+| 通信方式 | CAN 2.0扩展帧 @ 500Kbps |
+| 控制模式 | MIT、位置(PP/CSP)、速度、电流 |
+
+#### M1502E 电机（CAN标准帧）
+
+| 参数 | 数值 |
+|------|------|
+| 通信方式 | CAN 2.0标准帧 @ 500Kbps |
+| 控制模式 | 速度模式 |
+| ID范围 | 1-4（可通过CAN配置） |
 
 #### M0601C 电机（UART）
 
 | 参数 | 数值 |
 |------|------|
-| 通信方式 | UART @ 115200 bps |
+| 通信方式 | UART @ 115200 bps, 8N1 |
 | 帧长度 | 10字节（含CRC-8/MAXIM校验） |
 | 控制模式 | 电流环、速度环、位置环 |
+| ID范围 | 1-4 |
 
 ---
 
@@ -394,18 +465,18 @@ This project is developed for educational purposes as part of the 2026 Mingyue C
 
 ```
 Wheel-Legged_Robot/
-├── Core/                          # 主应用代码
-│   ├── Inc/                       # 头文件
+├── Core/                              # 主应用代码
+│   ├── Inc/                           # 头文件
 │   │   ├── main.h
 │   │   ├── can.h
 │   │   └── gpio.h
-│   └── Src/                       # 源文件
-│       ├── main.c                 # 主程序入口
-│       ├── can.c                  # CAN初始化及M1502E驱动
-│       └── gpio.c                 # GPIO配置
+│   └── Src/                           # 源文件
+│       ├── main.c                     # 主程序入口
+│       ├── can.c                      # CAN初始化及M1502E驱动
+│       └── gpio.c                     # GPIO配置
 │
-├── Motor_Drivers/                 # 电机驱动模块
-│   ├── EL05_MOTOR_DRIVE/          # EL05 CAN电机驱动
+├── Motor_Drivers/                     # 电机驱动模块
+│   ├── EL05_MOTOR_DRIVE/              # EL05 CAN电机驱动
 │   │   ├── Core/
 │   │   │   ├── Inc/
 │   │   │   │   ├── el05_motor.h       # EL05驱动API
@@ -416,7 +487,7 @@ Wheel-Legged_Robot/
 │   │   │       └── main_example.c     # 使用示例
 │   │   └── EL05电机驱动使用指南.md     # 中文文档
 │   │
-│   └── M0601C_DRIVE/              # M0601C UART电机驱动
+│   └── M0601C_DRIVE/                  # M0601C UART电机驱动
 │       ├── Core/
 │       │   ├── Inc/
 │       │   │   └── motor_driver.h     # M0601C驱动API
@@ -424,10 +495,10 @@ Wheel-Legged_Robot/
 │       │       └── motor_driver.c     # M0601C实现
 │       └── *.md                       # 文档文件
 │
-├── Drivers/                       # STM32 HAL及CMSIS库
-├── MDK-ARM/                       # Keil MDK工程文件
-├── EWARM/                         # IAR EWARM工程文件
-└── WheelRobot.ioc                 # STM32CubeMX配置文件
+├── Drivers/                           # STM32 HAL及CMSIS库
+├── MDK-ARM/                           # Keil MDK工程文件
+├── EWARM/                             # IAR EWARM工程文件
+└── WheelRobot.ioc                     # STM32CubeMX配置文件
 ```
 
 ---
@@ -436,7 +507,7 @@ Wheel-Legged_Robot/
 
 ### 1. 硬件连接
 
-**EL05电机连接：**
+**EL05电机（CAN扩展帧）：**
 ```
 EL05电机            STM32F407
 ─────────────────────────────
@@ -448,11 +519,22 @@ GND          ───►   GND
 注意：CAN总线两端需加120Ω终端电阻
 ```
 
-**M0601C电机连接：**
+**M1502E电机（CAN标准帧）：**
+```
+M1502E电机          STM32F407
+─────────────────────────────
+CAN_H        ───►   CAN_H (PD1)
+CAN_L        ───►   CAN_L (PD0)
+GND          ───►   GND
+
+注意：与EL05共用同一条CAN总线
+```
+
+**M0601C电机（UART）：**
 ```
 M0601C电机          STM32F407
 ─────────────────────────────
-TX           ───►   USART1_RX (PA10)
+TX           ───►   USART1_RX (PB7)
 RX           ───►   USART1_TX (PA9)
 GND          ───►   GND
 ```
@@ -478,7 +560,6 @@ GND          ───►   GND
 ```c
 #include "el05_motor.h"
 
-// 电机句柄
 EL05_MotorHandle_t motor1;
 
 int main(void) {
@@ -508,6 +589,30 @@ int main(void) {
     while (1) {
         EL05_MitControl(&motor1, &cmd);
         HAL_Delay(10);  // 100Hz控制频率
+    }
+}
+```
+
+**M1502E电机示例：**
+
+```c
+#include "can.h"
+
+int main(void) {
+    HAL_Init();
+    SystemClock_Config();
+    MX_GPIO_Init();
+    MX_CAN1_Init();
+
+    // 切换到速度模式
+    M1502E_SetSpeedMode();
+    HAL_Delay(100);
+
+    // 设置电机转速 (RPM)
+    M1502E_SetVelocity(30);  // 30 RPM
+
+    while (1) {
+        // 主循环
     }
 }
 ```
@@ -542,7 +647,7 @@ int main(void) {
 
 ## API参考
 
-### EL05电机驱动（CAN）
+### EL05电机驱动（CAN扩展帧）
 
 | 函数 | 描述 |
 |------|------|
@@ -555,8 +660,19 @@ int main(void) {
 | `EL05_PositionControl(motor, pos, vel_limit)` | 位置控制 |
 | `EL05_VelocityControl(motor, vel, cur_limit)` | 速度控制 |
 | `EL05_CurrentControl(motor, cur)` | 电流控制 |
+| `EL05_SetZeroPosition(motor)` | 设置机械零点 |
+| `EL05_WriteParam(motor, addr, value)` | 写参数 |
+| `EL05_ReadParam(motor, addr)` | 读参数 |
 | `EL05_GetFeedback(motor)` | 获取反馈数据 |
 | `EL05_CheckOnline(motor, timeout)` | 检查电机在线状态 |
+
+### M1502E电机驱动（CAN标准帧）
+
+| 函数 | 描述 |
+|------|------|
+| `M1502E_SetSpeedMode()` | 切换电机到速度模式 |
+| `M1502E_SetVelocity(rpm)` | 设置电机转速 (RPM) |
+| `M1502E_Config_ID(id)` | 设置电机ID (1-8) |
 
 ### M0601C电机驱动（UART）
 
@@ -618,9 +734,10 @@ int main(void) {
 ### 通用安全
 
 - 上电前务必检查电机连接
-- 确保CAN终端电阻正确（120Ω）
+- 确保CAN终端电阻正确（两端各120Ω）
 - 运行时监控电机温度
 - 从低增益开始，逐渐增加
+- 切勿超过额定电压或电流限制
 
 ---
 
@@ -632,6 +749,8 @@ int main(void) {
 | 电机抖动 | 增益过高 | 降低Kp和Kd值 |
 | CAN通信失败 | 波特率不匹配 | 确认500Kbps设置 |
 | 过热 | 负载过大 | 降低负载或占空比 |
+| UART无响应 | 引脚错误 | 检查PB7(RX)/PA9(TX) |
+| CRC错误 | 信号干扰 | 检查线缆屏蔽 |
 
 ---
 
@@ -647,7 +766,7 @@ int main(void) {
 ## 参考资料
 
 - [EL05电机使用手册](Motor_Drivers/EL05_MOTOR_DRIVE/EL05电机驱动使用指南.md)
-- [STM32F407参考手册](https://www.st.com/resource/en/reference_manual/dm00031051.pdf)
+- [STM32F407参考手册 (RM0090)](https://www.st.com/resource/en/reference_manual/dm00031051.pdf)
 - [CAN协议规范](https://www.can-cia.org/)
 
 ---
@@ -664,4 +783,4 @@ int main(void) {
 
 ---
 
-**祝开发顺利！**
+**Happy Coding! | 祝开发顺利！**
