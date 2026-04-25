@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file    can_rx_handler.h
-  * @brief   CAN Receive Handler Header File
+  * @brief   CAN RX interrupt callback header
   ******************************************************************************
   */
 
@@ -12,17 +12,7 @@
 extern "C" {
 #endif
 
-/* Includes ------------------------------------------------------------------*/
 #include "main.h"
-
-/* Exported functions prototypes ---------------------------------------------*/
-
-/**
- * @brief Enhanced CAN RX callback with complete data parsing
- * @param hcan: Pointer to CAN handle
- * @retval None
- */
-void EL05_CAN_RxHandler(CAN_HandleTypeDef *hcan);
 
 #ifdef __cplusplus
 }

@@ -2,8 +2,8 @@
   ******************************************************************************
   * @file    el05_motor.h
   * @brief   EL05 Motor Driver Header File
-  * @note    This file contains EL05 motor control functions and data structures
-  *          Based on EL05 User Manual v1.0 (2025-11-25)
+  * @note    Based on EL05 User Manual v1.0 (2025-11-25)
+  *          Private protocol (CAN 2.0 extended frame)
   ******************************************************************************
   */
 
@@ -14,228 +14,103 @@
 extern "C" {
 #endif
 
-/* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "can.h"
 #include <stdint.h>
 
 /* Exported types ------------------------------------------------------------*/
 
-/**
- * @brief EL05 Motor Control Modes
- */
 typedef enum {
-    EL05_MODE_MIT = 0,       // MIT Minchee mode (运控模式)
-    EL05_MODE_PP = 1,        // Position Profile mode (位置模式)
-    EL05_MODE_VELOCITY = 2,  // Velocity mode (速度模式)
-    EL05_MODE_CURRENT = 3,   // Current mode (电流模式)
-    EL05_MODE_CSP = 5        // Cyclic Synchronous Position mode (位置模式CSP)
+    EL05_MODE_MIT = 0,       // 运控模式
+    EL05_MODE_PP = 1,        // 位置模式PP
+    EL05_MODE_VELOCITY = 2,  // 速度模式
+    EL05_MODE_CURRENT = 3,   // 电流模式
+    EL05_MODE_CSP = 5        // 位置模式CSP
 } EL05_ControlMode_e;
 
-/**
- * @brief EL05 Motor State
- */
 typedef enum {
-    EL05_STATE_DISABLE = 0,  // Motor disabled
-    EL05_STATE_ENABLE = 1,   // Motor enabled
-    EL05_STATE_ERROR = 2     // Motor error state
+    EL05_STATE_DISABLE = 0,
+    EL05_STATE_ENABLE = 1,
+    EL05_STATE_ERROR = 2
 } EL05_MotorState_e;
 
 /**
- * @brief EL05 CAN Protocol Types
- */
-typedef enum {
-    EL05_TYPE_GET_ID = 0,        // Get device ID
-    EL05_TYPE_CONTROL = 1,       // MIT control command
-    EL05_TYPE_FEEDBACK = 2,      // Motor feedback data
-    EL05_TYPE_ENABLE = 3,        // Motor enable
-    EL05_TYPE_STOP = 4,          // Motor stop
-    EL05_TYPE_SET_ZERO = 6,      // Set mechanical zero position
-    EL05_TYPE_SET_CAN_ID = 7,    // Set CAN ID
-    EL05_TYPE_READ_PARAM = 17,   // Read single parameter
-    EL05_TYPE_WRITE_PARAM = 18,  // Write single parameter (lost on power off)
-    EL05_TYPE_FAULT_FEEDBACK = 21, // Fault feedback
-    EL05_TYPE_SAVE_DATA = 22,    // Save data
-    EL05_TYPE_SET_BAUDRATE = 23, // Set baud rate
-    EL05_TYPE_AUTO_REPORT = 24,  // Auto report
-    EL05_TYPE_SET_PROTOCOL = 25, // Set protocol
-    EL05_TYPE_GET_VERSION = 26   // Get version number
-} EL05_ProtocolType_e;
-
-/**
- * @brief EL05 Motor Feedback Data Structure
+ * @brief EL05 CAN Extended Frame ID structure
+ * @note  29-bit ID: Bit28~24=通信类型, Bit23~8=data2, Bit7~0=目标地址
  */
 typedef struct {
-    uint8_t  id;           // Motor ID
-    uint8_t  fault;        // Fault status
-    float    position;     // Position (rad), range: -4π ~ 4π
-    float    velocity;     // Velocity (rad/s)
-    float    torque;       // Torque (N·m)
-    float    temperature;  // Temperature (℃)
-    uint32_t timestamp;    // Timestamp (ms)
+    uint32_t id : 8;      // Bit7~0: 目标电机CAN_ID
+    uint32_t data2 : 16;  // Bit23~8: 数据区2 (master_id or torque_uint)
+    uint32_t mode : 5;    // Bit28~24: 通信类型
+    uint32_t res : 3;     // Bit31~29: 保留
+} EL05_CanExtId_t;
+
+typedef struct {
+    uint8_t  id;
+    uint8_t  fault;
+    float    position;     // rad, range: -12.57 ~ 12.57
+    float    velocity;     // rad/s, range: -50 ~ 50
+    float    torque;       // N.m, range: -6 ~ 6
+    float    temperature;  // ℃
+    uint8_t  mode_state;   // 0:Reset, 1:Cali, 2:Motor
+    uint32_t timestamp;
 } EL05_MotorFeedback_t;
 
-/**
- * @brief EL05 Motor Control Command Structure
- */
 typedef struct {
-    float p_des;    // Desired position (rad)
-    float v_des;    // Desired velocity (rad/s)
-    float kp;       // Position gain
-    float kd;       // Velocity gain
-    float t_ff;     // Feedforward torque (N·m)
+    float p_des;    // 目标位置 (rad)
+    float v_des;    // 目标速度 (rad/s)
+    float kp;       // 位置增益 (0~500)
+    float kd;       // 速度增益 (0~5)
+    float t_ff;     // 前馈力矩 (N.m, -6~6)
 } EL05_MitControl_t;
 
-/**
- * @brief EL05 Motor Handle Structure
- */
 typedef struct {
-    uint8_t can_id;                  // CAN ID (0-255)
-    EL05_ControlMode_e mode;         // Control mode
-    EL05_MotorState_e state;         // Motor state
-    EL05_MotorFeedback_t feedback;   // Feedback data
-    uint32_t last_update_time;       // Last update timestamp
-    uint8_t is_online;               // Online status flag
+    uint8_t can_id;
+    EL05_ControlMode_e mode;
+    EL05_MotorState_e state;
+    EL05_MotorFeedback_t feedback;
+    uint32_t last_update_time;
+    uint8_t is_online;
 } EL05_MotorHandle_t;
 
 /* Exported constants --------------------------------------------------------*/
 
-// EL05 Motor Specifications
-#define EL05_RATED_VOLTAGE         48.0f    // V
-#define EL05_RATED_TORQUE          1.8f     // N·m
-#define EL05_PEAK_TORQUE           6.0f     // N·m
-#define EL05_NO_LOAD_SPEED         430.0f   // rpm
-#define EL05_GEAR_RATIO            9.0f     // Reduction ratio
+// EL05 Motor Specs
+#define EL05_RATED_VOLTAGE     48.0f
+#define EL05_RATED_TORQUE      1.8f
+#define EL05_PEAK_TORQUE       6.0f
+#define EL05_NO_LOAD_SPEED     430.0f
+#define EL05_GEAR_RATIO        9.0f
 
-// MIT Mode Parameter Limits
-#define EL05_P_MIN    (-12.5f)    // Position min (rad)
-#define EL05_P_MAX    (12.5f)     // Position max (rad)
-#define EL05_V_MIN    (-30.0f)    // Velocity min (rad/s)
-#define EL05_V_MAX    (30.0f)     // Velocity max (rad/s)
-#define EL05_KP_MIN   (0.0f)      // Kp min
-#define EL05_KP_MAX   (500.0f)    // Kp max
-#define EL05_KD_MIN   (0.0f)      // Kd min
-#define EL05_KD_MAX   (5.0f)      // Kd max
-#define EL05_T_MIN    (-18.0f)    // Torque min (N·m)
-#define EL05_T_MAX    (18.0f)     // Torque max (N·m)
+// MIT Mode Parameter Limits (per manual section 4.4.2)
+#define EL05_P_MIN    (-12.57f)   // rad
+#define EL05_P_MAX    (12.57f)    // rad
+#define EL05_V_MIN    (-50.0f)    // rad/s
+#define EL05_V_MAX    (50.0f)     // rad/s
+#define EL05_KP_MIN   (0.0f)
+#define EL05_KP_MAX   (500.0f)
+#define EL05_KD_MIN   (0.0f)
+#define EL05_KD_MAX   (5.0f)
+#define EL05_T_MIN    (-6.0f)     // N.m
+#define EL05_T_MAX    (6.0f)      // N.m
 
-/* Exported macro ------------------------------------------------------------*/
+// Default master CAN ID
+#define EL05_MASTER_ID  0xFD      // 主机CAN_ID
 
 /* Exported functions prototypes ---------------------------------------------*/
 
-/**
- * @brief Initialize EL05 motor driver
- * @param hcan: Pointer to CAN handle
- * @retval None
- */
+uint32_t float_to_uint(float x, float x_min, float x_max, int bits);
+float uint_to_float(uint32_t x, float x_min, float x_max, int bits);
+
 void EL05_Init(CAN_HandleTypeDef *hcan);
-
-/**
- * @brief Start CAN reception
- * @retval HAL status
- */
-HAL_StatusTypeDef EL05_StartReception(void);
-
-/**
- * @brief Enable motor
- * @param motor: Pointer to motor handle
- * @retval HAL status
- */
 HAL_StatusTypeDef EL05_Enable(EL05_MotorHandle_t *motor);
-
-/**
- * @brief Disable motor
- * @param motor: Pointer to motor handle
- * @retval HAL status
- */
 HAL_StatusTypeDef EL05_Disable(EL05_MotorHandle_t *motor);
-
-/**
- * @brief Set motor control mode
- * @param motor: Pointer to motor handle
- * @param mode: Control mode
- * @retval HAL status
- */
-HAL_StatusTypeDef EL05_SetMode(EL05_MotorHandle_t *motor, EL05_ControlMode_e mode);
-
-/**
- * @brief MIT mode control (运控模式)
- * @param motor: Pointer to motor handle
- * @param control: Pointer to control command
- * @retval HAL status
- */
 HAL_StatusTypeDef EL05_MitControl(EL05_MotorHandle_t *motor, EL05_MitControl_t *control);
-
-/**
- * @brief Position control (CSP mode)
- * @param motor: Pointer to motor handle
- * @param position: Target position (rad)
- * @param velocity_limit: Velocity limit (rad/s)
- * @retval HAL status
- */
-HAL_StatusTypeDef EL05_PositionControl(EL05_MotorHandle_t *motor, float position, float velocity_limit);
-
-/**
- * @brief Velocity control
- * @param motor: Pointer to motor handle
- * @param velocity: Target velocity (rad/s)
- * @param current_limit: Current limit (A)
- * @retval HAL status
- */
-HAL_StatusTypeDef EL05_VelocityControl(EL05_MotorHandle_t *motor, float velocity, float current_limit);
-
-/**
- * @brief Current control
- * @param motor: Pointer to motor handle
- * @param current: Target current (A)
- * @retval HAL status
- */
-HAL_StatusTypeDef EL05_CurrentControl(EL05_MotorHandle_t *motor, float current);
-
-/**
- * @brief Set mechanical zero position
- * @param motor: Pointer to motor handle
- * @retval HAL status
- */
-HAL_StatusTypeDef EL05_SetZeroPosition(EL05_MotorHandle_t *motor);
-
-/**
- * @brief Write parameter
- * @param motor: Pointer to motor handle
- * @param param_addr: Parameter address
- * @param param_value: Parameter value
- * @retval HAL status
- */
+HAL_StatusTypeDef EL05_SetMode(EL05_MotorHandle_t *motor, EL05_ControlMode_e mode);
 HAL_StatusTypeDef EL05_WriteParam(EL05_MotorHandle_t *motor, uint16_t param_addr, float param_value);
-
-/**
- * @brief Read parameter
- * @param motor: Pointer to motor handle
- * @param param_addr: Parameter address
- * @retval HAL status
- */
 HAL_StatusTypeDef EL05_ReadParam(EL05_MotorHandle_t *motor, uint16_t param_addr);
-
-/**
- * @brief Get motor feedback data
- * @param motor: Pointer to motor handle
- * @retval Pointer to feedback data
- */
 EL05_MotorFeedback_t* EL05_GetFeedback(EL05_MotorHandle_t *motor);
-
-/**
- * @brief Check motor online status
- * @param motor: Pointer to motor handle
- * @param timeout_ms: Timeout in milliseconds
- * @retval 1 if online, 0 if offline
- */
 uint8_t EL05_CheckOnline(EL05_MotorHandle_t *motor, uint32_t timeout_ms);
-
-/**
- * @brief CAN RX callback function (called from HAL CAN interrupt)
- * @param hcan: Pointer to CAN handle
- * @retval None
- */
 void EL05_CAN_RxCallback(CAN_HandleTypeDef *hcan);
 
 #ifdef __cplusplus
