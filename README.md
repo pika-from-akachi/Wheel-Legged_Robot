@@ -36,7 +36,40 @@ This project implements the embedded control system for a wheel-legged robot, de
 | Debug Interface | SWD (PA13: SWDIO, PA14: SWCLK) |
 | External Oscillator | 12 MHz HSE |
 
-### Supported Motors
+### Supported Motors and Modules
+
+#### NRF24L01+ Wireless Module (Remote Control)
+
+| Parameter | Value |
+|-----------|-------|
+| Operating Voltage | 1.9V - 3.6V (3.3V recommended) |
+| Frequency Range | 2.400GHz - 2.525GHz |
+| Data Rate | 250kbps (configured) |
+| TX Power | -6dBm (configured) |
+| Communication | SPI interface (SPI3) |
+| Range | Up to 100m (open area) |
+| Features | Auto-acknowledgment, auto-retransmit, pairing protocol |
+
+**Hardware Connection:**
+```
+NRF24L01 Module      STM32F407
+─────────────────────────────
+VCC         ───►   3.3V (⚠️ NOT 5V!)
+GND         ───►   GND
+CE          ───►   PC8
+CSN         ───►   PC9
+SCK         ───►   PC10 (SPI3_SCK)
+MOSI        ───►   PC12 (SPI3_MOSI)
+MISO        ───►   PC11 (SPI3_MISO)
+IRQ         ───►   PC7 (optional)
+```
+
+**Pairing Protocol:**
+- Default pairing address: `"HXFB0"`
+- New address after pairing: `"HXFB1"`
+- RF Channel: 25 (2.425GHz)
+- Payload width: 16 bytes
+- Auto-retransmit: 8 retries, 2000µs delay
 
 #### EL05 Quasi-Direct-Drive Motor (CAN Extended Frame)
 
@@ -95,13 +128,22 @@ Wheel-Legged_Robot/
 │   │   │       └── main_example.c     # Usage examples
 │   │   └── EL05电机驱动使用指南.md     # Chinese documentation
 │   │
-│   └── M0601C_DRIVE/                  # M0601C UART motor driver
+│   ├── M0601C_DRIVE/                  # M0601C UART motor driver
+│   │   ├── Core/
+│   │   │   ├── Inc/
+│   │   │   │   └── motor_driver.h     # M0601C driver API
+│   │   │   └── Src/
+│   │   │       └── motor_driver.c     # M0601C implementation
+│   │   └── *.md                       # Documentation files
+│   │
+│   └── NRF24L01_DRIVER/               # NRF24L01+ wireless module driver
 │       ├── Core/
 │       │   ├── Inc/
-│       │   │   └── motor_driver.h     # M0601C driver API
+│       │   │   └── nrf24l01.h         # NRF24L01 driver API
 │       │   └── Src/
-│       │       └── motor_driver.c     # M0601C implementation
-│       └── *.md                       # Documentation files
+│       │       ├── nrf24l01.c         # NRF24L01 implementation
+│       │       └── nrf24l01_example.c # Usage examples
+│       └── README.md                  # Documentation
 │
 ├── Drivers/                           # STM32 HAL & CMSIS libraries
 ├── MDK-ARM/                           # Keil MDK project files
@@ -297,6 +339,77 @@ int main(void) {
 | `MOTOR_GetFeedback()` | Get raw feedback |
 | `MOTOR_GetStatus()` | Get parsed status |
 
+### NRF24L01+ Wireless Module Driver
+
+| Function | Description |
+|----------|-------------|
+| `NRF24L01_RX_Init()` | Initialize receiver with default address |
+| `NRF24L01_RX_WaitForPairing()` | Wait for remote pairing (10s timeout) |
+| `NRF24L01_RX_ReadData()` | Read data from remote (auto-response) |
+| `NRF24L01_RX_GetData()` | Get parsed remote control data |
+| `NRF24L01_RX_IsOnline()` | Check remote online status |
+| `NRF24L01_RX_IsPaired()` | Check pairing status |
+
+**Remote Control Data Structure:**
+```c
+typedef struct {
+    uint8_t right_joystick_x;   // 128=center
+    uint8_t right_joystick_y;   // 128=center
+    uint8_t left_joystick_x;    // 128=center
+    uint8_t left_joystick_y;    // 128=center
+    uint8_t button_state;       // Button bitmask
+    uint8_t rolling_code;       // Rolling code
+    uint8_t data_valid;         // Data valid flag
+    uint32_t timestamp;         // Reception timestamp (ms)
+} RemoteControlData_t;
+```
+
+**Usage Example:**
+```c
+#include "nrf24l01_rx.h"
+
+int main(void) {
+    HAL_Init();
+    SystemClock_Config();
+    MX_GPIO_Init();
+    MX_SPI3_Init();
+
+    // Initialize NRF24L01 receiver
+    NRF24L01_RX_Init();
+
+    // Wait for pairing (10s timeout)
+    if (!NRF24L01_RX_WaitForPairing()) {
+        // Pairing failed
+        while(1);
+    }
+
+    while (1) {
+        // Read remote data
+        if (NRF24L01_RX_ReadData()) {
+            RemoteControlData_t *rc = NRF24L01_RX_GetData();
+
+            // Use joystick data (128 = center)
+            int16_t right_x = rc->right_joystick_x - 128;
+            int16_t right_y = rc->right_joystick_y - 128;
+            int16_t left_x = rc->left_joystick_x - 128;
+            int16_t left_y = rc->left_joystick_y - 128;
+
+            // Check buttons
+            if (rc->button_state & 0x01) {
+                // KEY1 pressed
+            }
+        }
+
+        // Check online status
+        if (!NRF24L01_RX_IsOnline()) {
+            // Remote offline - stop motors
+        }
+
+        HAL_Delay(10);  // 100Hz update rate
+    }
+}
+```
+
 ---
 
 ## Control Modes
@@ -374,6 +487,7 @@ Output Torque = Kp × (p_des - p_actual) + Kd × (v_des - v_actual) + t_ff
 ## References
 
 - [EL05 Motor User Manual](Motor_Drivers/EL05_MOTOR_DRIVE/EL05电机驱动使用指南.md)
+- [NRF24L01+ Wireless Module Driver](Motor_Drivers/NRF24L01_DRIVER/README.md)
 - [STM32F407 Reference Manual (RM0090)](https://www.st.com/resource/en/reference_manual/dm00031051.pdf)
 - [CAN Protocol Specification](https://www.can-cia.org/)
 
@@ -428,7 +542,40 @@ This project is developed for educational purposes as part of the 2026 Mingyue C
 | 调试接口 | SWD (PA13: SWDIO, PA14: SWCLK) |
 | 外部晶振 | 12 MHz HSE |
 
-### 支持的电机
+### 支持的电机和模块
+
+#### NRF24L01+ 无线模块 (遥控器)
+
+| 参数 | 数值 |
+|------|------|
+| 工作电压 | 1.9V - 3.6V (推荐3.3V) |
+| 频率范围 | 2.400GHz - 2.525GHz |
+| 数据速率 | 250kbps (已配置) |
+| 发射功率 | -6dBm (已配置) |
+| 通信方式 | SPI接口 (SPI3) |
+| 通信距离 | 开阔地最远100米 |
+| 特性 | 自动应答、自动重传、对码协议 |
+
+**硬件连接：**
+```
+NRF24L01模块        STM32F407
+─────────────────────────────
+VCC         ───►   3.3V (⚠️ 不要接5V!)
+GND         ───►   GND
+CE          ───►   PC8
+CSN         ───►   PC9
+SCK         ───►   PC10 (SPI3_SCK)
+MOSI        ───►   PC12 (SPI3_MOSI)
+MISO        ───►   PC11 (SPI3_MISO)
+IRQ         ───►   PC7 (可选)
+```
+
+**对码协议：**
+- 默认对码地址：`"HXFB0"`
+- 对码后新地址：`"HXFB1"`
+- RF通道：25 (2.425GHz)
+- 负载宽度：16字节
+- 自动重传：8次重试，2000µs延时
 
 #### EL05 准直驱电机（CAN扩展帧）
 
@@ -537,6 +684,20 @@ M0601C电机          STM32F407
 TX           ───►   USART1_RX (PB7)
 RX           ───►   USART1_TX (PA9)
 GND          ───►   GND
+```
+
+**NRF24L01+无线模块：**
+```
+NRF24L01模块        STM32F407
+─────────────────────────────
+VCC         ───►   3.3V (⚠️ 不要接5V!)
+GND         ───►   GND
+CE          ───►   PC8
+CSN         ───►   PC9
+SCK         ───►   PC10 (SPI3_SCK)
+MOSI        ───►   PC12 (SPI3_MOSI)
+MISO        ───►   PC11 (SPI3_MISO)
+IRQ         ───►   PC7 (可选)
 ```
 
 ### 2. 软件编译
@@ -766,6 +927,7 @@ int main(void) {
 ## 参考资料
 
 - [EL05电机使用手册](Motor_Drivers/EL05_MOTOR_DRIVE/EL05电机驱动使用指南.md)
+- [NRF24L01+ 无线模块驱动](Motor_Drivers/NRF24L01_DRIVER/README.md)
 - [STM32F407参考手册 (RM0090)](https://www.st.com/resource/en/reference_manual/dm00031051.pdf)
 - [CAN协议规范](https://www.can-cia.org/)
 
