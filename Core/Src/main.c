@@ -25,6 +25,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "nrf24l01_rx.h"
+#include "icm42688.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -57,6 +58,24 @@ volatile uint8_t online_status = 0;
 volatile uint32_t packet_count = 0;
 volatile uint8_t ack_payload_sent = 0;
 volatile uint8_t fallback_tx_used = 0;
+
+// IMU数据（Keil Watch窗口查看）
+extern volatile float g_imu_accel_x_g;
+extern volatile float g_imu_accel_y_g;
+extern volatile float g_imu_accel_z_g;
+extern volatile float g_imu_gyro_x_dps;
+extern volatile float g_imu_gyro_y_dps;
+extern volatile float g_imu_gyro_z_dps;
+extern volatile float g_imu_temperature_c;
+extern volatile int16_t g_imu_accel_x_raw;
+extern volatile int16_t g_imu_accel_y_raw;
+extern volatile int16_t g_imu_accel_z_raw;
+extern volatile int16_t g_imu_gyro_x_raw;
+extern volatile int16_t g_imu_gyro_y_raw;
+extern volatile int16_t g_imu_gyro_z_raw;
+extern volatile uint8_t g_imu_who_am_i;
+extern volatile uint8_t g_imu_init_status;
+volatile uint8_t imu_initialized = 0;
 
 // Extern debug variables from nrf24l01_rx.c
 extern volatile uint8_t g_ack_payload_sent;
@@ -132,6 +151,9 @@ int main(void)
   // 初始化NRF24L01接收器
   NRF24L01_RX_Init();
 
+  // 初始化ICM42688 IMU
+  imu_initialized = ICM42688_Init();
+
   // 等待对码（10秒超时）
   if (!NRF24L01_RX_WaitForPairing()) {
     pairing_status = 0;  // 对码失败
@@ -163,6 +185,11 @@ int main(void)
 
       // 在这里添加你的控制逻辑
       // 例如：电机控制、按键处理等
+    }
+
+    // 读取IMU数据
+    if (imu_initialized) {
+      ICM42688_Update();
     }
 
     // 检查在线状态
