@@ -127,6 +127,7 @@ int main(void)
   MX_GPIO_Init();
   MX_CAN1_Init();
   MX_SPI3_Init();
+  MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
   // 初始化NRF24L01接收器
   NRF24L01_RX_Init();
