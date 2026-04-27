@@ -333,3 +333,17 @@ void Task_Debug(void *argument)
 
 /* USER CODE END Application */
 
+/**
+  * @brief Stack overflow hook function
+  * @note  Called when stack overflow is detected
+  */
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+    (void)xTask;
+    (void)pcTaskName;
+
+    /* Stack overflow detected - enter infinite loop for debugging */
+    taskDISABLE_INTERRUPTS();
+    for (;;);
+}
+
