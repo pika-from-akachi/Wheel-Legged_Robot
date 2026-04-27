@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 #include "can.h"
 #include "spi.h"
 #include "gpio.h"
@@ -106,6 +107,7 @@ extern volatile uint8_t g_debug_new_address_sent[5];
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
+void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -148,19 +150,18 @@ int main(void)
   MX_SPI3_Init();
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
-  // 初始化NRF24L01接收器
-  NRF24L01_RX_Init();
-
-  // 初始化ICM42688 IMU
-  imu_initialized = ICM42688_Init();
-
-  // 等待对码（10秒超时）
-  if (!NRF24L01_RX_WaitForPairing()) {
-    pairing_status = 0;  // 对码失败
-  } else {
-    pairing_status = 1;  // 对码成功
-  }
+  /* FreeRTOS tasks will handle all initialization and control */
+  /* Do not initialize peripherals here - tasks will do it */
   /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
+  MX_FREERTOS_Init();
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -169,42 +170,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    // 读取遥控器数据
-    if (NRF24L01_RX_ReadData()) {
-      RemoteControlData_t *rc = NRF24L01_RX_GetData();
-      remote_data = *rc;
-
-      // 转换摇杆值到中心范围 (-128~127)
-      debug_right_x = (int16_t)rc->right_joystick_x - 128;
-      debug_right_y = (int16_t)rc->right_joystick_y - 128;
-      debug_left_x = (int16_t)rc->left_joystick_x - 128;
-      debug_left_y = (int16_t)rc->left_joystick_y - 128;
-      debug_buttons = rc->button_state;
-
-      packet_count++;
-
-      // 在这里添加你的控制逻辑
-      // 例如：电机控制、按键处理等
-    }
-
-    // 读取IMU数据
-    if (imu_initialized) {
-      ICM42688_Update();
-    }
-
-    // 检查在线状态
-    online_status = NRF24L01_RX_IsOnline();
-
-    // 同步调试变量
-    ack_payload_sent = g_ack_payload_sent;
-    fallback_tx_used = g_fallback_tx_used;
-
-    // 安全保护：遥控器离线时停止电机
-    if (!online_status) {
-      // 停止电机
-    }
-
-    HAL_Delay(10);  // 100Hz更新率
+    /* This code will never execute - FreeRTOS tasks run independently */
   }
   /* USER CODE END 3 */
 }
@@ -257,6 +223,28 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM1 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM1)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
