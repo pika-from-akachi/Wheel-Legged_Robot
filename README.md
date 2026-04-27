@@ -35,9 +35,9 @@ This project implements the embedded control system for a wheel-legged robot, de
 | Core | ARM Cortex-M4 @ 168 MHz with FPU |
 | CAN Interface | CAN1 (PD0: CAN_RX, PD1: CAN_TX) |
 | UART Interface | USART1 (PB7: RX, PA9: TX) with DMA |
-| SPI Interface | SPI1 (PA5: SCK, PA6: MISO, PA7: MOSI) for IMU<br>SPI3 (PC10: SCK, PC11: MISO, PC12: MOSI) for NRF24L01 |
+| SPI Interface | SPI1 (PA5: SCK, PA6: MISO, PA7: MOSI, PA4: CS) for IMU<br>SPI3 (PC10: SCK, PC11: MISO, PC12: MOSI) for NRF24L01 |
 | Debug Interface | SWD (PA13: SWDIO, PA14: SWCLK) |
-| External Oscillator | 12 MHz HSE |
+| External Oscillator | 8 MHz HSE |
 
 ### Supported Motors and Modules
 
@@ -114,7 +114,7 @@ ICM-42688-P Module     STM32F407
 ──────────────────────────────
 VCC         ───►   3.3V
 GND         ───►   GND
-CS          ───►   PA4 (GPIO)
+CS          ───►   PA4 (GPIO Output, software controlled)
 SCLK        ───►   PA5 (SPI1_SCK)
 MISO        ───►   PA6 (SPI1_MISO)
 MOSI        ───►   PA7 (SPI1_MOSI)
@@ -161,7 +161,7 @@ Wheel-Legged_Robot/
 │   │   └── gpio.h
 │   └── Src/                           # Source files
 │       ├── main.c                     # Main entry point
-│       ├── can.c                      # CAN init & M1502E driver
+│       ├── can.c                      # CAN initialization
 │       └── gpio.c                     # GPIO configuration
 │
 ├── Motor_Drivers/                     # Motor driver modules
@@ -546,9 +546,9 @@ This project is developed for educational purposes as part of the 2026 Mingyue C
 | 内核 | ARM Cortex-M4 @ 168 MHz，带FPU |
 | CAN接口 | CAN1 (PD0: CAN_RX, PD1: CAN_TX) |
 | UART接口 | USART1 (PB7: RX, PA9: TX)，带DMA |
-| SPI接口 | SPI1 (PA5: SCK, PA6: MISO, PA7: MOSI) 用于IMU<br>SPI3 (PC10: SCK, PC11: MISO, PC12: MOSI) 用于NRF24L01 |
+| SPI接口 | SPI1 (PA5: SCK, PA6: MISO, PA7: MOSI, PA4: CS) 用于IMU<br>SPI3 (PC10: SCK, PC11: MISO, PC12: MOSI) 用于NRF24L01 |
 | 调试接口 | SWD (PA13: SWDIO, PA14: SWCLK) |
-| 外部晶振 | 12 MHz HSE |
+| 外部晶振 | 8 MHz HSE |
 
 ### 支持的电机和模块
 
@@ -596,16 +596,9 @@ IRQ         ───►   PC7 (可选)
 | 减速比 | 9:1 |
 | 通信方式 | CAN 2.0扩展帧 @ 500Kbps |
 | 控制模式 | MIT、位置(PP/CSP)、速度、电流 |
+| 应用场景 | 轮足机器人关节电机 |
 
-#### M1502E 电机（CAN标准帧）
-
-| 参数 | 数值 |
-|------|------|
-| 通信方式 | CAN 2.0标准帧 @ 500Kbps |
-| 控制模式 | 速度模式 |
-| ID范围 | 1-4（可通过CAN配置） |
-
-#### M0601C 电机（UART）
+#### M0601C 电机（UART）- 轮毂电机
 
 | 参数 | 数值 |
 |------|------|
@@ -613,6 +606,58 @@ IRQ         ───►   PC7 (可选)
 | 帧长度 | 10字节（含CRC-8/MAXIM校验） |
 | 控制模式 | 电流环、速度环、位置环 |
 | ID范围 | 1-4 |
+| 应用场景 | 轮足机器人轮毂电机 |
+
+#### ICM-42688-P 六轴IMU传感器
+
+| 参数 | 数值 |
+|------|------|
+| 加速度计范围 | ±16g（可配置：±2g, ±4g, ±8g, ±16g） |
+| 陀螺仪范围 | ±2000dps（可配置） |
+| 输出数据速率 | 1kHz（可配置） |
+| 通信方式 | SPI接口 (SPI1) |
+| 滤波算法 | 卡尔曼滤波（默认）、移动平均、低通滤波 |
+| 温度传感器 | 内置 |
+
+**硬件连接：**
+```
+ICM-42688-P模块      STM32F407
+──────────────────────────────
+VCC         ───►   3.3V
+GND         ───►   GND
+CS          ───►   PA4 (GPIO输出，软件控制)
+SCLK        ───►   PA5 (SPI1_SCK)
+MISO        ───►   PA6 (SPI1_MISO)
+MOSI        ───►   PA7 (SPI1_MOSI)
+INT1        ───►   可选（数据就绪中断）
+```
+
+**使用示例：**
+```c
+#include "icm42688.h"
+
+int main(void) {
+    HAL_Init();
+    SystemClock_Config();
+    MX_GPIO_Init();
+    MX_SPI1_Init();
+
+    // 初始化ICM42688
+    uint8_t init_ok = ICM42688_Init();
+
+    while (1) {
+        // 更新传感器数据（带卡尔曼滤波）
+        ICM42688_Update();
+
+        // 访问滤波后数据
+        float accel_x = g_imu_accel_x_filtered;  // g
+        float gyro_x = g_imu_gyro_x_filtered;    // deg/s
+        float temp = g_imu_temperature_c;        // °C
+
+        HAL_Delay(10);  // 100Hz更新率
+    }
+}
+```
 
 ---
 
@@ -627,7 +672,7 @@ Wheel-Legged_Robot/
 │   │   └── gpio.h
 │   └── Src/                           # 源文件
 │       ├── main.c                     # 主程序入口
-│       ├── can.c                      # CAN初始化及M1502E驱动
+│       ├── can.c                      # CAN初始化
 │       └── gpio.c                     # GPIO配置
 │
 ├── Motor_Drivers/                     # 电机驱动模块
@@ -672,17 +717,6 @@ GND          ───►   GND
 48V DC       ───►   电源 (15V-60V)
 
 注意：CAN总线两端需加120Ω终端电阻
-```
-
-**M1502E电机（CAN标准帧）：**
-```
-M1502E电机          STM32F407
-─────────────────────────────
-CAN_H        ───►   CAN_H (PD1)
-CAN_L        ───►   CAN_L (PD0)
-GND          ───►   GND
-
-注意：与EL05共用同一条CAN总线
 ```
 
 **M0601C电机（UART）：**
@@ -762,30 +796,6 @@ int main(void) {
 }
 ```
 
-**M1502E电机示例：**
-
-```c
-#include "can.h"
-
-int main(void) {
-    HAL_Init();
-    SystemClock_Config();
-    MX_GPIO_Init();
-    MX_CAN1_Init();
-
-    // 切换到速度模式
-    M1502E_SetSpeedMode();
-    HAL_Delay(100);
-
-    // 设置电机转速 (RPM)
-    M1502E_SetVelocity(30);  // 30 RPM
-
-    while (1) {
-        // 主循环
-    }
-}
-```
-
 **M0601C电机示例：**
 
 ```c
@@ -834,14 +844,6 @@ int main(void) {
 | `EL05_ReadParam(motor, addr)` | 读参数 |
 | `EL05_GetFeedback(motor)` | 获取反馈数据 |
 | `EL05_CheckOnline(motor, timeout)` | 检查电机在线状态 |
-
-### M1502E电机驱动（CAN标准帧）
-
-| 函数 | 描述 |
-|------|------|
-| `M1502E_SetSpeedMode()` | 切换电机到速度模式 |
-| `M1502E_SetVelocity(rpm)` | 设置电机转速 (RPM) |
-| `M1502E_Config_ID(id)` | 设置电机ID (1-8) |
 
 ### M0601C电机驱动（UART）
 
