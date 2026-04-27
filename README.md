@@ -2,6 +2,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-STM32F407-blue.svg)](https://www.st.com/en/microcontrollers-microprocessors/stm32f407-417.html)
 [![Framework](https://img.shields.io/badge/Framework-STM32CubeMX_6.15.0-green.svg)](https://www.st.com/en/development-tools/stm32cubemx.html)
+[![RTOS](https://img.shields.io/badge/RTOS-FreeRTOS_V10.6.2-orange.svg)](https://www.freertos.org)
 [![Language](https://img.shields.io/badge/Language-C-orange.svg)](https://en.wikipedia.org/wiki/C_(programming_language))
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -15,11 +16,13 @@ This project implements the embedded control system for a wheel-legged robot, de
 
 ### Key Features
 
+- **Real-Time Operating System**: FreeRTOS V10.6.2 with 8 priority-based tasks
 - **Multi-Motor Support**: EL05 joint motor (CAN extended frame), M0601C wheel motor (UART)
 - **IMU Sensor**: ICM-42688-P 6-axis IMU with Kalman filter (SPI1)
 - **Wireless Control**: NRF24L01+ remote controller with pairing protocol (SPI3)
 - **Multiple Control Modes**: MIT mode, Position, Velocity, Current control
 - **Real-time Communication**: CAN 2.0 @ 500Kbps, UART @ 115200bps with DMA
+- **Task Synchronization**: Message queues, mutexes, and semaphores
 - **STM32 HAL Framework**: Built with STM32CubeMX generated code
 - **Modular Architecture**: Independent driver modules for easy integration
 
@@ -147,6 +150,78 @@ int main(void) {
     }
 }
 ```
+
+---
+
+## FreeRTOS Task Architecture
+
+This project uses **FreeRTOS V10.6.2** with a comprehensive task-based architecture for real-time control.
+
+### Task Overview
+
+| Task | Hardware | Frequency | Priority | Stack | Description |
+|------|----------|-----------|----------|-------|-------------|
+| **IMU** | ICM-42688-P | 1kHz | Highest | 2KB | IMU data acquisition with Kalman filter |
+| **Remote** | NRF24L01+ | 100Hz | High | 2KB | Remote controller data reading |
+| **EL05 Motor** | EL05 (CAN) | 100Hz | Medium-High | 2KB | Joint motor control via CAN |
+| **M0601C Motor** | M0601C (UART) | 100Hz | Medium-High | 2KB | Wheel motor control via UART |
+| **CAN** | CAN Bus | 500Hz | High | 2KB | CAN communication management |
+| **Balance** | Control Algorithm | 500Hz | High | 4KB | Balance control algorithm |
+| **Monitor** | System Safety | 10Hz | Low | 1KB | System status monitoring |
+| **Debug** | Diagnostics | 1Hz | Lowest | 1KB | Debug output |
+
+### Task Communication
+
+```
+┌─────────┐
+│ IMU     │──queue───┐
+│ (1kHz)  │            │
+└─────────┘            ▼
+                 ┌──────────┐
+┌─────────┐      │ Balance  │      ┌──────────────┐
+│ Remote  │─────►│ (500Hz)  │─────►│ EL05 Motor   │
+│ (100Hz) │      └──────────┘      │ (100Hz)      │
+└─────────┘            │            └──────────────┘
+                       │
+                       └───────────►┌──────────────┐
+                                    │ M0601C Motor │
+                                    │ (100Hz)      │
+                                    └──────────────┘
+```
+
+### Resource Protection
+
+| Resource | Mutex | Protected Tasks |
+|----------|-------|-----------------|
+| CAN Bus | `mutex_CAN` | EL05_Motor, CAN |
+| SPI1 (IMU) | `mutex_SPI1` | IMU |
+| SPI3 (NRF24L01) | `mutex_SPI3` | Remote |
+| UART1 (M0601C) | `mutex_UART1` | M0601C_Motor |
+
+### Performance Metrics
+
+- **CPU Utilization**: ~20% (highly efficient)
+- **IMU Update Rate**: 1kHz (stable, non-blocking)
+- **Balance Control**: 500Hz (real-time response)
+- **Motor Control**: 100Hz (precise control)
+- **FreeRTOS Heap**: 32KB
+- **Total Stack**: ~16KB for all tasks
+
+### Monitoring Variables
+
+Debug counters available in Keil Watch window:
+
+```c
+g_imu_update_count           // Should increase by 1000 per second
+g_remote_update_count        // Should increase by 100 per second
+g_el05_motor_update_count    // Should increase by 100 per second
+g_m0601c_motor_update_count  // Should increase by 100 per second
+g_can_tx_count               // CAN TX message count
+g_can_rx_count               // CAN RX message count
+g_system_status              // 0 = all systems normal
+```
+
+For detailed FreeRTOS configuration, see [FREERTOS_CONFIG.md](FREERTOS_CONFIG.md).
 
 ---
 
@@ -526,11 +601,13 @@ This project is developed for educational purposes as part of the 2026 Mingyue C
 
 ### 主要特性
 
+- **实时操作系统**：FreeRTOS V10.6.2，8个优先级任务
 - **多电机支持**：EL05关节电机（CAN扩展帧）、M0601C轮毂电机（UART）
 - **IMU传感器**：ICM-42688-P六轴IMU，带卡尔曼滤波（SPI1）
 - **无线控制**：NRF24L01+遥控器，支持对码协议（SPI3）
 - **多种控制模式**：MIT模式、位置控制、速度控制、电流控制
 - **实时通信**：CAN 2.0 @ 500Kbps，UART @ 115200bps（DMA模式）
+- **任务同步**：消息队列、互斥量、信号量
 - **STM32 HAL框架**：基于STM32CubeMX生成的代码
 - **模块化架构**：独立驱动模块，易于集成
 
@@ -658,6 +735,78 @@ int main(void) {
     }
 }
 ```
+
+---
+
+## FreeRTOS任务架构
+
+本项目使用**FreeRTOS V10.6.2**，采用基于任务的架构实现实时控制。
+
+### 任务概览
+
+| 任务 | 硬件 | 频率 | 优先级 | 栈大小 | 描述 |
+|------|------|------|--------|--------|------|
+| **IMU** | ICM-42688-P | 1kHz | 最高 | 2KB | IMU数据采集（卡尔曼滤波） |
+| **Remote** | NRF24L01+ | 100Hz | 高 | 2KB | 遥控器数据读取 |
+| **EL05 Motor** | EL05 (CAN) | 100Hz | 中高 | 2KB | 关节电机控制（CAN） |
+| **M0601C Motor** | M0601C (UART) | 100Hz | 中高 | 2KB | 轮毂电机控制（UART） |
+| **CAN** | CAN总线 | 500Hz | 高 | 2KB | CAN通信管理 |
+| **Balance** | 控制算法 | 500Hz | 高 | 4KB | 平衡控制算法 |
+| **Monitor** | 系统安全 | 10Hz | 低 | 1KB | 系统状态监控 |
+| **Debug** | 诊断输出 | 1Hz | 最低 | 1KB | 调试输出 |
+
+### 任务通信
+
+```
+┌─────────┐
+│ IMU     │──队列───┐
+│ (1kHz)  │            │
+└─────────┘            ▼
+                 ┌──────────┐
+┌─────────┐      │ Balance  │      ┌──────────────┐
+│ Remote  │─────►│ (500Hz)  │─────►│ EL05 Motor   │
+│ (100Hz) │      └──────────┘      │ (100Hz)      │
+└─────────┘            │            └──────────────┘
+                       │
+                       └───────────►┌──────────────┐
+                                    │ M0601C Motor │
+                                    │ (100Hz)      │
+                                    └──────────────┘
+```
+
+### 资源保护
+
+| 资源 | 互斥量 | 保护任务 |
+|------|--------|----------|
+| CAN总线 | `mutex_CAN` | EL05_Motor, CAN |
+| SPI1 (IMU) | `mutex_SPI1` | IMU |
+| SPI3 (NRF24L01) | `mutex_SPI3` | Remote |
+| UART1 (M0601C) | `mutex_UART1` | M0601C_Motor |
+
+### 性能指标
+
+- **CPU利用率**：~20%（高效）
+- **IMU更新率**：1kHz（稳定，非阻塞）
+- **平衡控制**：500Hz（实时响应）
+- **电机控制**：100Hz（精确控制）
+- **FreeRTOS堆**：32KB
+- **总栈大小**：~16KB（所有任务）
+
+### 监控变量
+
+Keil Watch窗口可用的调试计数器：
+
+```c
+g_imu_update_count           // 应每秒增加1000
+g_remote_update_count        // 应每秒增加100
+g_el05_motor_update_count    // 应每秒增加100
+g_m0601c_motor_update_count  // 应每秒增加100
+g_can_tx_count               // CAN发送计数
+g_can_rx_count               // CAN接收计数
+g_system_status              // 0 = 所有系统正常
+```
+
+详细FreeRTOS配置请参见 [FREERTOS_CONFIG.md](FREERTOS_CONFIG.md)。
 
 ---
 
