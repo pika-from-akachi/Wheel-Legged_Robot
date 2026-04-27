@@ -15,7 +15,9 @@ This project implements the embedded control system for a wheel-legged robot, de
 
 ### Key Features
 
-- **Multi-Motor Support**: EL05 (CAN extended frame), M1502E (CAN standard frame), M0601C (UART)
+- **Multi-Motor Support**: EL05 joint motor (CAN extended frame), M0601C wheel motor (UART)
+- **IMU Sensor**: ICM-42688-P 6-axis IMU with Kalman filter (SPI1)
+- **Wireless Control**: NRF24L01+ remote controller with pairing protocol (SPI3)
 - **Multiple Control Modes**: MIT mode, Position, Velocity, Current control
 - **Real-time Communication**: CAN 2.0 @ 500Kbps, UART @ 115200bps with DMA
 - **STM32 HAL Framework**: Built with STM32CubeMX generated code
@@ -31,8 +33,9 @@ This project implements the embedded control system for a wheel-legged robot, de
 |-----------|---------------|
 | MCU | STM32F407IGHx (UFBGA176 package) |
 | Core | ARM Cortex-M4 @ 168 MHz with FPU |
-| CAN Interface | CAN1 (PD0: RX, PD1: TX) |
+| CAN Interface | CAN1 (PD0: CAN_RX, PD1: CAN_TX) |
 | UART Interface | USART1 (PB7: RX, PA9: TX) with DMA |
+| SPI Interface | SPI1 (PA5: SCK, PA6: MISO, PA7: MOSI) for IMU<br>SPI3 (PC10: SCK, PC11: MISO, PC12: MOSI) for NRF24L01 |
 | Debug Interface | SWD (PA13: SWDIO, PA14: SWCLK) |
 | External Oscillator | 12 MHz HSE |
 
@@ -71,7 +74,7 @@ IRQ         ───►   PC7 (optional)
 - Payload width: 16 bytes
 - Auto-retransmit: 8 retries, 2000µs delay
 
-#### EL05 Quasi-Direct-Drive Motor (CAN Extended Frame)
+#### EL05 Quasi-Direct-Drive Motor (CAN Extended Frame) - Joint Motor
 
 | Parameter | Value |
 |-----------|-------|
@@ -82,16 +85,9 @@ IRQ         ───►   PC7 (optional)
 | Gear Ratio | 9:1 |
 | Communication | CAN 2.0 Extended Frame @ 500Kbps |
 | Control Modes | MIT, Position (PP/CSP), Velocity, Current |
+| Application | Joint motor for wheel-legged robot |
 
-#### M1502E Motor (CAN Standard Frame)
-
-| Parameter | Value |
-|-----------|-------|
-| Communication | CAN 2.0 Standard Frame @ 500Kbps |
-| Control Modes | Velocity mode |
-| ID Range | 1-4 (configurable via CAN) |
-
-#### M0601C Motor (UART)
+#### M0601C Motor (UART) - Wheel Motor
 
 | Parameter | Value |
 |-----------|-------|
@@ -99,6 +95,58 @@ IRQ         ───►   PC7 (optional)
 | Frame Length | 10 bytes (with CRC-8/MAXIM) |
 | Control Modes | Current, Speed, Position |
 | ID Range | 1-4 |
+| Application | Wheel motor for wheel-legged robot |
+
+#### ICM-42688-P 6-Axis IMU Sensor
+
+| Parameter | Value |
+|-----------|-------|
+| Accelerometer Range | ±16g (configurable: ±2g, ±4g, ±8g, ±16g) |
+| Gyroscope Range | ±2000dps (configurable) |
+| Output Data Rate | 1kHz (configurable) |
+| Communication | SPI interface (SPI1) |
+| Filter | Kalman filter (default), Moving Average, Low-pass |
+| Temperature Sensor | Built-in |
+
+**Hardware Connection:**
+```
+ICM-42688-P Module     STM32F407
+──────────────────────────────
+VCC         ───►   3.3V
+GND         ───►   GND
+CS          ───►   PA4 (GPIO)
+SCLK        ───►   PA5 (SPI1_SCK)
+MISO        ───►   PA6 (SPI1_MISO)
+MOSI        ───►   PA7 (SPI1_MOSI)
+INT1        ───►   Optional (data ready interrupt)
+```
+
+**Usage Example:**
+```c
+#include "icm42688.h"
+
+int main(void) {
+    HAL_Init();
+    SystemClock_Config();
+    MX_GPIO_Init();
+    MX_SPI1_Init();
+
+    // Initialize ICM42688
+    uint8_t init_ok = ICM42688_Init();
+
+    while (1) {
+        // Update sensor data (with Kalman filtering)
+        ICM42688_Update();
+
+        // Access filtered data
+        float accel_x = g_imu_accel_x_filtered;  // g
+        float gyro_x = g_imu_gyro_x_filtered;    // deg/s
+        float temp = g_imu_temperature_c;        // °C
+
+        HAL_Delay(10);  // 100Hz update rate
+    }
+}
+```
 
 ---
 
@@ -169,17 +217,6 @@ GND          ───►   GND
 Note: Add 120Ω termination resistor at both ends of CAN bus
 ```
 
-**M1502E Motor (CAN Standard Frame):**
-```
-M1502E Motor        STM32F407
-─────────────────────────────
-CAN_H        ───►   CAN_H (PD1)
-CAN_L        ───►   CAN_L (PD0)
-GND          ───►   GND
-
-Note: Shares the same CAN bus with EL05
-```
-
 **M0601C Motor (UART):**
 ```
 M0601C Motor        STM32F407
@@ -243,30 +280,6 @@ int main(void) {
 }
 ```
 
-**M1502E Motor Example:**
-
-```c
-#include "can.h"
-
-int main(void) {
-    HAL_Init();
-    SystemClock_Config();
-    MX_GPIO_Init();
-    MX_CAN1_Init();
-
-    // Switch to velocity mode
-    M1502E_SetSpeedMode();
-    HAL_Delay(100);
-
-    // Set motor velocity (RPM)
-    M1502E_SetVelocity(30);  // 30 RPM
-
-    while (1) {
-        // Main loop
-    }
-}
-```
-
 **M0601C Motor Example:**
 
 ```c
@@ -315,14 +328,6 @@ int main(void) {
 | `EL05_ReadParam(motor, addr)` | Read parameter |
 | `EL05_GetFeedback(motor)` | Get feedback data |
 | `EL05_CheckOnline(motor, timeout)` | Check motor online status |
-
-### M1502E Motor Driver (CAN Standard Frame)
-
-| Function | Description |
-|----------|-------------|
-| `M1502E_SetSpeedMode()` | Switch motor to velocity mode |
-| `M1502E_SetVelocity(rpm)` | Set motor velocity (RPM) |
-| `M1502E_Config_ID(id)` | Set motor ID (1-8) |
 
 ### M0601C Motor Driver (UART)
 
@@ -521,7 +526,9 @@ This project is developed for educational purposes as part of the 2026 Mingyue C
 
 ### 主要特性
 
-- **多电机支持**：EL05（CAN扩展帧）、M1502E（CAN标准帧）、M0601C（UART）
+- **多电机支持**：EL05关节电机（CAN扩展帧）、M0601C轮毂电机（UART）
+- **IMU传感器**：ICM-42688-P六轴IMU，带卡尔曼滤波（SPI1）
+- **无线控制**：NRF24L01+遥控器，支持对码协议（SPI3）
 - **多种控制模式**：MIT模式、位置控制、速度控制、电流控制
 - **实时通信**：CAN 2.0 @ 500Kbps，UART @ 115200bps（DMA模式）
 - **STM32 HAL框架**：基于STM32CubeMX生成的代码
@@ -537,8 +544,9 @@ This project is developed for educational purposes as part of the 2026 Mingyue C
 |------|------|
 | MCU | STM32F407IGHx (UFBGA176封装) |
 | 内核 | ARM Cortex-M4 @ 168 MHz，带FPU |
-| CAN接口 | CAN1 (PD0: RX, PD1: TX) |
+| CAN接口 | CAN1 (PD0: CAN_RX, PD1: CAN_TX) |
 | UART接口 | USART1 (PB7: RX, PA9: TX)，带DMA |
+| SPI接口 | SPI1 (PA5: SCK, PA6: MISO, PA7: MOSI) 用于IMU<br>SPI3 (PC10: SCK, PC11: MISO, PC12: MOSI) 用于NRF24L01 |
 | 调试接口 | SWD (PA13: SWDIO, PA14: SWCLK) |
 | 外部晶振 | 12 MHz HSE |
 

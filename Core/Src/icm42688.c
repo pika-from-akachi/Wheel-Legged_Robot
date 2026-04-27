@@ -6,6 +6,7 @@
   */
 
 #include "icm42688.h"
+#include <string.h>
 
 /* Global device handle */
 ICM42688_Handle_t icm42688_handle = {0};
@@ -26,6 +27,14 @@ volatile int16_t g_imu_gyro_y_raw = 0;
 volatile int16_t g_imu_gyro_z_raw = 0;
 volatile uint8_t g_imu_who_am_i = 0;
 volatile uint8_t g_imu_init_status = 0;
+
+/* Filtered data for display */
+volatile float g_imu_accel_x_filtered = 0.0f;
+volatile float g_imu_accel_y_filtered = 0.0f;
+volatile float g_imu_accel_z_filtered = 0.0f;
+volatile float g_imu_gyro_x_filtered = 0.0f;
+volatile float g_imu_gyro_y_filtered = 0.0f;
+volatile float g_imu_gyro_z_filtered = 0.0f;
 
 /* ============================================================================
  *                          SPI LOW-LEVEL FUNCTIONS
@@ -125,6 +134,7 @@ uint8_t ICM42688_Init(void)
     icm42688_handle.accel_fs = ICM42688_ACCEL_FS_16G;
     icm42688_handle.gyro_sensitivity = 16.4f;   /* 2000 dps / 32768 */
     icm42688_handle.accel_sensitivity = 0.488f; /* 16 g / 32768 * 1000 mg/g */
+    icm42688_handle.filter_type = ICM42688_FILTER_KALMAN; /* Default: Kalman filter (best performance) */
 
     g_imu_init_status = 1; /* GPIO initialized */
 
@@ -192,6 +202,10 @@ uint8_t ICM42688_Init(void)
     g_imu_init_status = 10; /* INT_ASYNC_RESET configured */
 
     icm42688_handle.is_initialized = 1;
+
+    /* Initialize filter */
+    ICM42688_ResetFilter();
+
     g_imu_init_status = 100; /* Initialization complete */
 
     return 1;
@@ -297,6 +311,101 @@ void ICM42688_SetPowerMode(ICM42688_GyroMode_t gyro_mode, ICM42688_AccelMode_t a
 }
 
 /* ============================================================================
+ *                          FILTERING FUNCTIONS
+ * ============================================================================ */
+
+static float MovingAverage(float *buf, float new_val, uint8_t *index)
+{
+    buf[*index] = new_val;
+    *index = (*index + 1) % ICM42688_MOVING_AVG_SIZE;
+
+    float sum = 0.0f;
+    for (uint8_t i = 0; i < ICM42688_MOVING_AVG_SIZE; i++) {
+        sum += buf[i];
+    }
+    return sum / ICM42688_MOVING_AVG_SIZE;
+}
+
+static float LowPassFilter(float current, float *state)
+{
+    *state = ICM42688_LOW_PASS_ALPHA * current + (1.0f - ICM42688_LOW_PASS_ALPHA) * (*state);
+    return *state;
+}
+
+static float KalmanFilter(float measurement, float *state, float *P, float Q, float R)
+{
+    /* Predict */
+    float P_pred = *P + Q;
+
+    /* Update */
+    float K = P_pred / (P_pred + R);
+    *state = *state + K * (measurement - *state);
+    *P = (1.0f - K) * P_pred;
+
+    return *state;
+}
+
+void ICM42688_SetFilter(ICM42688_FilterType_t filter_type)
+{
+    icm42688_handle.filter_type = filter_type;
+    ICM42688_ResetFilter();
+}
+
+void ICM42688_ResetFilter(void)
+{
+    ICM42688_FilterState_t *fs = &icm42688_handle.filter_state;
+
+    /* Clear all filter states */
+    memset(fs, 0, sizeof(ICM42688_FilterState_t));
+
+    /* Initialize Kalman filter parameters */
+    fs->kalman_Q = 0.01f;    /* Process noise */
+    fs->kalman_R = 0.1f;     /* Measurement noise */
+    fs->kalman_P = 1.0f;     /* Initial error covariance */
+}
+
+static void ICM42688_ApplyFilter(ICM42688_ScaledData_t *raw, ICM42688_ScaledData_t *filtered)
+{
+    ICM42688_FilterState_t *fs = &icm42688_handle.filter_state;
+
+    switch (icm42688_handle.filter_type) {
+        case ICM42688_FILTER_NONE:
+            *filtered = *raw;
+            break;
+
+        case ICM42688_FILTER_MOVING_AVG:
+            filtered->accel_x_g = MovingAverage(fs->accel_x_buf, raw->accel_x_g, &fs->buf_index);
+            filtered->accel_y_g = MovingAverage(fs->accel_y_buf, raw->accel_y_g, &fs->buf_index);
+            filtered->accel_z_g = MovingAverage(fs->accel_z_buf, raw->accel_z_g, &fs->buf_index);
+            filtered->gyro_x_dps = MovingAverage(fs->gyro_x_buf, raw->gyro_x_dps, &fs->buf_index);
+            filtered->gyro_y_dps = MovingAverage(fs->gyro_y_buf, raw->gyro_y_dps, &fs->buf_index);
+            filtered->gyro_z_dps = MovingAverage(fs->gyro_z_buf, raw->gyro_z_dps, &fs->buf_index);
+            filtered->temperature_c = raw->temperature_c;
+            break;
+
+        case ICM42688_FILTER_LOW_PASS:
+            filtered->accel_x_g = LowPassFilter(raw->accel_x_g, &fs->accel_x_lpf);
+            filtered->accel_y_g = LowPassFilter(raw->accel_y_g, &fs->accel_y_lpf);
+            filtered->accel_z_g = LowPassFilter(raw->accel_z_g, &fs->accel_z_lpf);
+            filtered->gyro_x_dps = LowPassFilter(raw->gyro_x_dps, &fs->gyro_x_lpf);
+            filtered->gyro_y_dps = LowPassFilter(raw->gyro_y_dps, &fs->gyro_y_lpf);
+            filtered->gyro_z_dps = LowPassFilter(raw->gyro_z_dps, &fs->gyro_z_lpf);
+            filtered->temperature_c = raw->temperature_c;
+            break;
+
+        case ICM42688_FILTER_KALMAN:
+            filtered->accel_x_g = KalmanFilter(raw->accel_x_g, &fs->accel_x_kalman, &fs->kalman_P, fs->kalman_Q, fs->kalman_R);
+            filtered->accel_y_g = KalmanFilter(raw->accel_y_g, &fs->accel_y_kalman, &fs->kalman_P, fs->kalman_Q, fs->kalman_R);
+            filtered->accel_z_g = KalmanFilter(raw->accel_z_g, &fs->accel_z_kalman, &fs->kalman_P, fs->kalman_Q, fs->kalman_R);
+            filtered->gyro_x_dps = KalmanFilter(raw->gyro_x_dps, &fs->gyro_x_kalman, &fs->kalman_P, fs->kalman_Q, fs->kalman_R);
+            filtered->gyro_y_dps = KalmanFilter(raw->gyro_y_dps, &fs->gyro_y_kalman, &fs->kalman_P, fs->kalman_Q, fs->kalman_R);
+            filtered->gyro_z_dps = KalmanFilter(raw->gyro_z_dps, &fs->gyro_z_kalman, &fs->kalman_P, fs->kalman_Q, fs->kalman_R);
+            filtered->temperature_c = raw->temperature_c;
+            break;
+    }
+}
+
+/* ============================================================================
  *                          DATA READING FUNCTIONS
  * ============================================================================ */
 
@@ -348,6 +457,9 @@ void ICM42688_Update(void)
     ICM42688_ReadScaledData(&icm42688_handle.scaled_data);
     ICM42688_ReadRawData(&icm42688_handle.raw_data);
 
+    /* Apply filter */
+    ICM42688_ApplyFilter(&icm42688_handle.scaled_data, &icm42688_handle.filtered_data);
+
     /* Update debug variables for Keil Watch Window */
     g_imu_accel_x_g = icm42688_handle.scaled_data.accel_x_g;
     g_imu_accel_y_g = icm42688_handle.scaled_data.accel_y_g;
@@ -362,6 +474,14 @@ void ICM42688_Update(void)
     g_imu_gyro_x_raw = icm42688_handle.raw_data.gyro_x;
     g_imu_gyro_y_raw = icm42688_handle.raw_data.gyro_y;
     g_imu_gyro_z_raw = icm42688_handle.raw_data.gyro_z;
+
+    /* Update filtered data for display */
+    g_imu_accel_x_filtered = icm42688_handle.filtered_data.accel_x_g;
+    g_imu_accel_y_filtered = icm42688_handle.filtered_data.accel_y_g;
+    g_imu_accel_z_filtered = icm42688_handle.filtered_data.accel_z_g;
+    g_imu_gyro_x_filtered = icm42688_handle.filtered_data.gyro_x_dps;
+    g_imu_gyro_y_filtered = icm42688_handle.filtered_data.gyro_y_dps;
+    g_imu_gyro_z_filtered = icm42688_handle.filtered_data.gyro_z_dps;
 }
 
 /* ============================================================================

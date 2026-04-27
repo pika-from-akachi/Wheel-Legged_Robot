@@ -174,6 +174,20 @@ typedef enum {
 } ICM42688_AccelMode_t;
 
 /* ============================================================================
+ *                          FILTER CONFIGURATION
+ * ============================================================================ */
+
+typedef enum {
+    ICM42688_FILTER_NONE = 0,       /* No filtering */
+    ICM42688_FILTER_MOVING_AVG,     /* Moving average filter */
+    ICM42688_FILTER_LOW_PASS,       /* Low-pass filter */
+    ICM42688_FILTER_KALMAN          /* Simple Kalman filter */
+} ICM42688_FilterType_t;
+
+#define ICM42688_MOVING_AVG_SIZE    5       /* Moving average window size */
+#define ICM42688_LOW_PASS_ALPHA     0.2f    /* Low-pass filter coefficient (0-1) */
+
+/* ============================================================================
  *                          DATA STRUCTURES
  * ============================================================================ */
 
@@ -204,6 +218,39 @@ typedef struct {
 } ICM42688_ScaledData_t;
 
 /**
+  * @brief Filter state structure
+  */
+typedef struct {
+    /* Moving average buffer */
+    float accel_x_buf[ICM42688_MOVING_AVG_SIZE];
+    float accel_y_buf[ICM42688_MOVING_AVG_SIZE];
+    float accel_z_buf[ICM42688_MOVING_AVG_SIZE];
+    float gyro_x_buf[ICM42688_MOVING_AVG_SIZE];
+    float gyro_y_buf[ICM42688_MOVING_AVG_SIZE];
+    float gyro_z_buf[ICM42688_MOVING_AVG_SIZE];
+    uint8_t buf_index;
+
+    /* Low-pass filter state */
+    float accel_x_lpf;
+    float accel_y_lpf;
+    float accel_z_lpf;
+    float gyro_x_lpf;
+    float gyro_y_lpf;
+    float gyro_z_lpf;
+
+    /* Kalman filter state */
+    float accel_x_kalman;
+    float accel_y_kalman;
+    float accel_z_kalman;
+    float gyro_x_kalman;
+    float gyro_y_kalman;
+    float gyro_z_kalman;
+    float kalman_P;         /* Error covariance */
+    float kalman_Q;         /* Process noise */
+    float kalman_R;         /* Measurement noise */
+} ICM42688_FilterState_t;
+
+/**
   * @brief ICM42688 device handle
   */
 typedef struct {
@@ -213,8 +260,11 @@ typedef struct {
     float gyro_sensitivity;             /* Gyro sensitivity (dps/LSB) */
     float accel_sensitivity;            /* Accel sensitivity (g/LSB) */
     uint8_t is_initialized;             /* Initialization flag */
+    ICM42688_FilterType_t filter_type;  /* Filter type */
     ICM42688_RawData_t raw_data;        /* Latest raw data */
     ICM42688_ScaledData_t scaled_data;  /* Latest scaled data */
+    ICM42688_ScaledData_t filtered_data;/* Latest filtered data */
+    ICM42688_FilterState_t filter_state;/* Filter state */
 } ICM42688_Handle_t;
 
 /* ============================================================================
@@ -243,6 +293,14 @@ extern volatile int16_t g_imu_gyro_z_raw;
 extern volatile uint8_t g_imu_who_am_i;
 extern volatile uint8_t g_imu_init_status;
 
+/* Filtered data (for comparison) */
+extern volatile float g_imu_accel_x_filtered;
+extern volatile float g_imu_accel_y_filtered;
+extern volatile float g_imu_accel_z_filtered;
+extern volatile float g_imu_gyro_x_filtered;
+extern volatile float g_imu_gyro_y_filtered;
+extern volatile float g_imu_gyro_z_filtered;
+
 /* ============================================================================
  *                          FUNCTION PROTOTYPES
  * ============================================================================ */
@@ -262,6 +320,10 @@ void ICM42688_SetPowerMode(ICM42688_GyroMode_t gyro_mode, ICM42688_AccelMode_t a
 void ICM42688_ReadRawData(ICM42688_RawData_t *data);
 void ICM42688_ReadScaledData(ICM42688_ScaledData_t *data);
 void ICM42688_Update(void);
+
+/* Filtering */
+void ICM42688_SetFilter(ICM42688_FilterType_t filter_type);
+void ICM42688_ResetFilter(void);
 
 /* Low-Level Functions */
 uint8_t ICM42688_ReadReg(uint8_t bank, uint8_t reg);
