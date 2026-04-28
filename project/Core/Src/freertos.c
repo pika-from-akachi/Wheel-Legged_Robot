@@ -18,6 +18,7 @@
 #include "icm42688.h"
 #include "nrf24l01_rx.h"
 #include "freertos_tasks.h"
+#include "motor_driver.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -165,7 +166,7 @@ void MX_FREERTOS_Init(void) {
     taskHandle_EL05_Motor = osThreadNew(Task_EL05_Motor, NULL, &attr);
   }
 
-  /* M0601C wheel motor task (100Hz) */
+  /* M0601C wheel motor task (50Hz) - reads remote joystick → drives wheels */
   {
     const osThreadAttr_t attr = {
       .name = "M0601C_Motor_Task",
@@ -273,29 +274,92 @@ void Task_EL05_Motor(void *argument)
 }
 
 /**
-  * @brief M0601C wheel motor control task (100Hz)
-  * @note  Controls M0601C motors via UART
+  * @brief M0601C wheel motor control task (50Hz)
+  * @note  Reads remote joystick from queue_RemoteData,
+  *        maps left Y-axis to RPM, drives both M0601C wheel motors.
   */
 void Task_M0601C_Motor(void *argument)
 {
+    RemoteData_t rc;
+    osStatus_t status;
+    uint32_t tick;
+
     (void)argument;
 
-    /* TODO: Initialize M0601C motor driver */
-    /* MOTOR_StartReceive(); */
+    /* --- Configurable parameters --- */
+    #define WHEEL_RPM_MAX       200      /* Max wheel speed (RPM) */
+    #define WHEEL_DEADBAND      8        /* Joystick deadband (±8) */
+    #define MOTOR_ID_LEFT       1        /* Left wheel motor ID */
+    #define MOTOR_ID_RIGHT      2        /* Right wheel motor ID */
 
-    uint32_t tick = osKernelGetTickCount();
+    /* --- Initialize --- */
+    MOTOR_StartReceive();
+
+    /*
+     * Ensure motors are in speed mode.
+     * On first power-up, motors default to speed mode, so this is optional.
+     * Uncomment if motors were left in position/current mode:
+     *
+     *   osMutexAcquire(mutex_UART1, osWaitForever);
+     *   MOTOR_SendModeSwitchCmd(MOTOR_ID_LEFT,  MOTOR_CTRL_SPEED);
+     *   MOTOR_SendModeSwitchCmd(MOTOR_ID_RIGHT, MOTOR_CTRL_SPEED);
+     *   osMutexRelease(mutex_UART1);
+     */
+
+    tick = osKernelGetTickCount();
+
     for (;;)
     {
-        /* TODO: Receive motor command from queue */
-        /* if (osMessageQueueGet(queue_M0601C_MotorCmd, &motorCmd, NULL, 10) == osOK) {
+        /* --- 1. Get latest remote data (non-blocking, 20ms timeout) --- */
+        status = osMessageQueueGet(queue_RemoteData, &rc, NULL, 20);
+
+        if (status == osOK) {
+            /* --- 2. Map left Y-axis to RPM --- */
+            /*
+             * rc.left_y: -128 (forward) … 0 (center) … 127 (backward)
+             *
+             *    forward (negative):  rpm = +max   (wheel spins forward)
+             *    backward (positive): rpm = -max   (wheel spins reverse)
+             *    center  (±deadband): rpm = 0
+             */
+            int32_t raw = rc.left_y;
+            int16_t rpm_left, rpm_right;
+
+            /* Apply deadband */
+            if (raw > -WHEEL_DEADBAND && raw < WHEEL_DEADBAND) {
+                rpm_left  = 0;
+                rpm_right = 0;
+            } else {
+                /* Map -128..-9 → +max..+1,  +9..+127 → -1..-max */
+                int32_t scaled;
+                if (raw < 0) {
+                    scaled = (raw + WHEEL_DEADBAND) * WHEEL_RPM_MAX / (128 - WHEEL_DEADBAND);
+                    rpm_left  = (int16_t)(-scaled);   /* forward */
+                    rpm_right = (int16_t)(-scaled);
+                } else {
+                    scaled = (raw - WHEEL_DEADBAND) * WHEEL_RPM_MAX / (127 - WHEEL_DEADBAND);
+                    rpm_left  = (int16_t)(-scaled);   /* backward */
+                    rpm_right = (int16_t)(-scaled);
+                }
+            }
+
+            /* --- 3. Send speed commands to both wheel motors --- */
             osMutexAcquire(mutex_UART1, osWaitForever);
-            MOTOR_SetSpeed(motorCmd.motor_id, motorCmd.velocity);
+            MOTOR_SetSpeed(MOTOR_ID_LEFT,  rpm_left);
+            MOTOR_SetSpeed(MOTOR_ID_RIGHT, rpm_right);
             osMutexRelease(mutex_UART1);
-        } */
+
+        } else {
+            /* --- 4. No remote data — safety stop --- */
+            osMutexAcquire(mutex_UART1, osWaitForever);
+            MOTOR_Stop(MOTOR_ID_LEFT);
+            MOTOR_Stop(MOTOR_ID_RIGHT);
+            osMutexRelease(mutex_UART1);
+        }
 
         g_m0601c_motor_update_count++;
-        osDelayUntil(tick + 10);
-        tick += 10;
+        osDelayUntil(tick + 20);  /* 50Hz */
+        tick += 20;
     }
 }
 

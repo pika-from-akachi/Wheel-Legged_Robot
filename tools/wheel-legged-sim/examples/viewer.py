@@ -6,7 +6,7 @@ import mujoco
 import mujoco.viewer
 from pathlib import Path
 
-HERE = Path(__file__).parent
+HERE = Path(__file__).resolve().parent.parent
 ROBOT_XML = HERE / "robot.xml"
 
 model = mujoco.MjModel.from_xml_path(str(ROBOT_XML))

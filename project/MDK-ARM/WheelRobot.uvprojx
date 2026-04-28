@@ -337,7 +337,7 @@
               <MiscControls />
               <Define>USE_HAL_DRIVER,STM32F407xx</Define>
               <Undefine />
-              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Motor_Drivers/M0601C_DRIVE/Core/Inc;../Motor_Drivers/EL05_MOTOR_DRIVE/Core/Inc</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -1566,6 +1566,31 @@
                   </Aads>
                 </FileArmAds>
               </FileOption>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>Motor_Drivers/M0601C_DRIVE</GroupName>
+          <Files>
+            <File>
+              <FileName>motor_driver.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Motor_Drivers\M0601C_DRIVE\Core\Src\motor_driver.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>Motor_Drivers/EL05_MOTOR_DRIVE</GroupName>
+          <Files>
+            <File>
+              <FileName>el05_motor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Motor_Drivers\EL05_MOTOR_DRIVE\Core\Src\el05_motor.c</FilePath>
+            </File>
+            <File>
+              <FileName>can_rx_handler.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Motor_Drivers\EL05_MOTOR_DRIVE\Core\Src\can_rx_handler.c</FilePath>
             </File>
           </Files>
         </Group>
