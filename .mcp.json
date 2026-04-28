@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "mujoco-mcp": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "tools/mujoco-mcp",
+        "python",
+        "-m",
+        "mujoco_mcp.server"
+      ]
+    }
+  }
+}
