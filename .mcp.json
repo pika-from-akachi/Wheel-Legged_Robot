@@ -10,6 +10,17 @@
         "-m",
         "mujoco_mcp.server"
       ]
+    },
+    "wheel-legged-sim": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "tools/wheel-legged-sim",
+        "python",
+        "-m",
+        "wheel_leg_sim.server"
+      ]
     }
   }
 }

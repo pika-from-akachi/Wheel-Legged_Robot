@@ -1,0 +1,104 @@
+<mujoco model="wheel_leg_robot">
+  <compiler angle="radian" coordinate="local" autolimits="true"/>
+
+  <option timestep="0.002" gravity="0 0 -9.81" iterations="50" tolerance="1e-8"/>
+
+  <size nconmax="100" njmax="200"/>
+
+  <default>
+    <geom type="capsule" condim="4" friction="0.8 0.1 0.01"/>
+    <joint damping="0.5" armature="0.01" stiffness="0"/>
+    <motor ctrlrange="-20 20" ctrllimited="true"/>
+    <position kp="200" kv="10"/>
+  </default>
+
+  <visual>
+    <headlight diffuse="0.8 0.8 0.8" ambient="0.3 0.3 0.3"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="120" elevation="-15"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.4 0.6 0.8" rgb2="0.1 0.15 0.2" width="800" height="800"/>
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512" rgb1="0.2 0.25 0.2" rgb2="0.25 0.3 0.25"/>
+    <material name="ground" texture="grid" texrepeat="8 8" reflectance="0.05"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 2 3" dir="0 -1 -1" castshadow="true"/>
+    <geom name="ground" type="plane" size="4 4 0.1" material="ground"/>
+
+    <!-- ======= TORSO ======= -->
+    <body name="torso" pos="0 0 0.35">
+      <inertial mass="1.5" pos="0 0 0" diaginertia="0.008 0.006 0.005"/>
+      <geom name="torso" type="box" size="0.1 0.05 0.035" rgba="0.2 0.4 0.8 1"/>
+      <site name="imu" pos="0 0 0" type="box" size="0.005 0.005 0.005"/>
+
+      <!-- ======= LEFT LEG ======= -->
+      <body name="left_thigh" pos="0 -0.07 -0.035">
+        <joint name="left_hip" type="hinge" axis="0 1 0" range="-1.5 1.5" limited="true"/>
+        <inertial mass="0.2" pos="0 0 -0.06" diaginertia="0.0005 0.0005 0.0005"/>
+        <geom name="left_thigh" type="capsule" fromto="0 0 0 0 0 -0.12" size="0.014"/>
+
+        <body name="left_shin" pos="0 0 -0.12">
+          <joint name="left_knee" type="hinge" axis="0 1 0" range="-2.0 0" limited="true"/>
+          <inertial mass="0.15" pos="0 0 -0.06" diaginertia="0.0003 0.0003 0.0003"/>
+          <geom name="left_shin" type="capsule" fromto="0 0 0 0 0 -0.12" size="0.012"/>
+
+          <body name="left_wheel" pos="0 0 -0.12">
+            <joint name="left_wheel" type="hinge" axis="0 1 0"/>
+            <inertial mass="0.08" pos="0 0 0" diaginertia="0.0003 0.0003 0.0003"/>
+            <geom name="left_wheel" type="cylinder" size="0.04 0.015" rgba="0.1 0.1 0.1 1"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- ======= RIGHT LEG ======= -->
+      <body name="right_thigh" pos="0 0.07 -0.035">
+        <joint name="right_hip" type="hinge" axis="0 1 0" range="-1.5 1.5" limited="true"/>
+        <inertial mass="0.2" pos="0 0 -0.06" diaginertia="0.0005 0.0005 0.0005"/>
+        <geom name="right_thigh" type="capsule" fromto="0 0 0 0 0 -0.12" size="0.014"/>
+
+        <body name="right_shin" pos="0 0 -0.12">
+          <joint name="right_knee" type="hinge" axis="0 1 0" range="-2.0 0" limited="true"/>
+          <inertial mass="0.15" pos="0 0 -0.06" diaginertia="0.0003 0.0003 0.0003"/>
+          <geom name="right_shin" type="capsule" fromto="0 0 0 0 0 -0.12" size="0.012"/>
+
+          <body name="right_wheel" pos="0 0 -0.12">
+            <joint name="right_wheel" type="hinge" axis="0 1 0"/>
+            <inertial mass="0.08" pos="0 0 0" diaginertia="0.0003 0.0003 0.0003"/>
+            <geom name="right_wheel" type="cylinder" size="0.04 0.015" rgba="0.1 0.1 0.1 1"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <position name="left_hip" joint="left_hip" kp="200" kv="10" ctrlrange="-1.5 1.5"/>
+    <position name="left_knee" joint="left_knee" kp="200" kv="10" ctrlrange="-2.0 0"/>
+    <motor name="left_wheel" joint="left_wheel" ctrlrange="-30 30"/>
+
+    <position name="right_hip" joint="right_hip" kp="200" kv="10" ctrlrange="-1.5 1.5"/>
+    <position name="right_knee" joint="right_knee" kp="200" kv="10" ctrlrange="-2.0 0"/>
+    <motor name="right_wheel" joint="right_wheel" ctrlrange="-30 30"/>
+  </actuator>
+
+  <sensor>
+    <framequat objtype="site" objname="imu" name="orientation"/>
+    <gyro site="imu" name="gyro"/>
+    <accelerometer site="imu" name="accelerometer"/>
+    <jointpos joint="left_hip" name="left_hip_pos"/>
+    <jointvel joint="left_hip" name="left_hip_vel"/>
+    <jointpos joint="left_knee" name="left_knee_pos"/>
+    <jointvel joint="left_knee" name="left_knee_vel"/>
+    <jointpos joint="left_wheel" name="left_wheel_pos"/>
+    <jointvel joint="left_wheel" name="left_wheel_vel"/>
+    <jointpos joint="right_hip" name="right_hip_pos"/>
+    <jointvel joint="right_hip" name="right_hip_vel"/>
+    <jointpos joint="right_knee" name="right_knee_pos"/>
+    <jointvel joint="right_knee" name="right_knee_vel"/>
+    <jointpos joint="right_wheel" name="right_wheel_pos"/>
+    <jointvel joint="right_wheel" name="right_wheel_vel"/>
+  </sensor>
+</mujoco>
