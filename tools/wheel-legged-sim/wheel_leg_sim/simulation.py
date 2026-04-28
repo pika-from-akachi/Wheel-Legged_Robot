@@ -65,7 +65,7 @@ class WheelLegSimulation:
                 "y": float(self.data.qpos[1]),
                 "z": float(self.data.qpos[2]),
             },
-            "torso_height": float(self.data.qpos[2]),
+            "torso_height": float(self.data.xpos[1][2]),
             "joint_positions": joint_positions,
             "joint_velocities": joint_velocities,
             "sensors": self._read_sensors(),

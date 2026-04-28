@@ -30,6 +30,7 @@
 
     <!-- ======= TORSO ======= -->
     <body name="torso" pos="0 0 0.35">
+      <joint name="root" type="free"/>
       <inertial mass="1.5" pos="0 0 0" diaginertia="0.008 0.006 0.005"/>
       <geom name="torso" type="box" size="0.1 0.05 0.035" rgba="0.2 0.4 0.8 1"/>
       <site name="imu" pos="0 0 0" type="box" size="0.005 0.005 0.005"/>
