@@ -321,6 +321,12 @@ void ICM42688_ReadRawData(ICM42688_RawData_t *data);
 void ICM42688_ReadScaledData(ICM42688_ScaledData_t *data);
 void ICM42688_Update(void);
 
+/* ISR-safe data reading (register-level SPI, no HAL/SysTick dependency) */
+uint8_t ICM42688_ReadRawData_FromISR(ICM42688_RawData_t *data);
+
+/* Process raw data: scale → filter → update debug vars */
+void ICM42688_ProcessRawData(const ICM42688_RawData_t *raw);
+
 /* Filtering */
 void ICM42688_SetFilter(ICM42688_FilterType_t filter_type);
 void ICM42688_ResetFilter(void);

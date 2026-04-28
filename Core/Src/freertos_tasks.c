@@ -9,6 +9,8 @@
 #include "icm42688.h"
 #include "nrf24l01_rx.h"
 #include "cmsis_os2.h"
+#include "FreeRTOS.h"
+#include "task.h"
 #include <string.h>
 
 /* ============================================================================
@@ -60,34 +62,98 @@ volatile uint32_t g_imu_update_count = 0;
 volatile uint32_t g_remote_update_count = 0;
 volatile uint32_t g_motor_update_count = 0;
 
+/* Double buffer for ISR→Task IMU data transfer */
+static ICM42688_RawData_t g_imu_raw_buf[2];
+static volatile uint32_t g_imu_raw_active_idx = 0;
+
+/* ============================================================================
+ *                          IMU ISR GLUE CODE
+ * ============================================================================ */
+
+/**
+  * @brief Start TIM2 for precise 1 kHz IMU read interrupts
+  * @note  TIM2 on APB1: 84 MHz / 84 = 1 MHz → / 1000 = 1 kHz
+  *        NVIC priority: 5 (max syscall priority, allows FreeRTOS API in ISR)
+  */
+void IMU_StartTimerInterrupt(void)
+{
+    __HAL_RCC_TIM2_CLK_ENABLE();
+
+    TIM2->PSC = 84 - 1;
+    TIM2->ARR = 1000 - 1;
+    TIM2->DIER |= TIM_DIER_UIE;
+
+    HAL_NVIC_SetPriority(TIM2_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(TIM2_IRQn);
+
+    TIM2->CR1 |= TIM_CR1_CEN;
+}
+
+/**
+  * @brief IMU ISR handler — called from TIM2_IRQHandler
+  * @note  Reads raw IMU data via register-level SPI, stores in double buffer,
+  *        then notifies Task_IMU via task notification.
+  */
+void IMU_ISR_Handler(void)
+{
+    ICM42688_RawData_t raw;
+
+    if (ICM42688_ReadRawData_FromISR(&raw)) {
+        uint32_t idx = g_imu_raw_active_idx;
+        g_imu_raw_buf[idx] = raw;
+        g_imu_raw_active_idx ^= 1;
+
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        vTaskNotifyGiveFromISR(taskHandle_IMU, &xHigherPriorityTaskWoken);
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    }
+}
+
+/**
+  * @brief Get the latest raw data from the double buffer
+  * @note  Reads the buffer that ISR is NOT currently writing to
+  * @return Copy of the latest raw data
+  */
+ICM42688_RawData_t IMU_GetLatestRawData(void)
+{
+    return g_imu_raw_buf[g_imu_raw_active_idx ^ 1];
+}
+
 /* ============================================================================
  *                          TASK IMPLEMENTATIONS
  * ============================================================================ */
 
 /**
-  * @brief IMU data acquisition task (highest priority)
-  * @note  Runs at 1kHz, reads and filters IMU data
+  * @brief IMU data processing task
+  * @note  Raw data is read by TIM2 ISR (hardware-timed 1kHz).
+  *        This task waits for ISR notification, then scales/filters the data.
   */
 void Task_IMU(void *argument)
 {
     IMU_Data_t imuData;
-    uint32_t tick_start;
 
     (void)argument;
 
-    /* Initialize IMU */
+    /* Initialize IMU (task context: HAL SPI with proper timeout) */
     if (!ICM42688_Init()) {
         g_system_status |= 0x01;  /* IMU init failed */
         vTaskSuspend(NULL);       /* Suspend this task */
     }
 
-    tick_start = osKernelGetTickCount();
+    /* Start TIM2 hardware timer for precise 1 kHz IMU reads */
+    IMU_StartTimerInterrupt();
 
     for (;;) {
-        /* Update IMU data with Kalman filter */
-        ICM42688_Update();
+        /* Wait for TIM2 ISR notification — raw data is ready */
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        /* Fill IMU data structure */
+        /* Read latest raw data from double buffer (ISR-safe) */
+        ICM42688_RawData_t raw = IMU_GetLatestRawData();
+
+        /* Scale, filter, update debug variables */
+        ICM42688_ProcessRawData(&raw);
+
+        /* Fill IMU data structure from processed debug vars */
         imuData.accel_x_g = g_imu_accel_x_filtered;
         imuData.accel_y_g = g_imu_accel_y_filtered;
         imuData.accel_z_g = g_imu_accel_z_filtered;
@@ -105,10 +171,6 @@ void Task_IMU(void *argument)
 
         /* Update counter */
         g_imu_update_count++;
-
-        /* Delay until next cycle (1kHz) */
-        osDelayUntil(tick_start + 1);
-        tick_start += 1;
     }
 }
 
@@ -326,7 +388,7 @@ void FREERTOS_CreateTasks(void)
     const osThreadAttr_t attr_IMU = {
         .name = "IMU_Task",
         .stack_size = TASK_STACK_SIZE_IMU * 4,
-        .priority = TASK_PRIORITY_IMU
+        .priority = TASK_PRIORITY_IMU_PROCESS
     };
     taskHandle_IMU = osThreadNew(Task_IMU, NULL, &attr_IMU);
 

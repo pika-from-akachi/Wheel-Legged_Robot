@@ -16,7 +16,8 @@ This project implements the embedded control system for a wheel-legged robot, de
 
 ### Key Features
 
-- **Real-Time Operating System**: FreeRTOS V10.6.2 with 8 priority-based tasks
+- **Real-Time Operating System**: FreeRTOS V10.6.2 with 7 priority-based tasks
+- **Interrupt-Driven IMU**: ICM-42688-P read by TIM2 hardware interrupt (1 kHz, deterministic timing)
 - **Multi-Motor Support**: EL05 joint motor (CAN extended frame), M0601C wheel motor (UART)
 - **IMU Sensor**: ICM-42688-P 6-axis IMU with Kalman filter (SPI1)
 - **Wireless Control**: NRF24L01+ remote controller with pairing protocol (SPI3)
@@ -124,9 +125,10 @@ MOSI        ───►   PA7 (SPI1_MOSI)
 INT1        ───►   Optional (data ready interrupt)
 ```
 
-**Usage Example:**
+**Usage Example (interrupt-driven, 1 kHz):**
 ```c
 #include "icm42688.h"
+#include "freertos_tasks.h"
 
 int main(void) {
     HAL_Init();
@@ -134,19 +136,22 @@ int main(void) {
     MX_GPIO_Init();
     MX_SPI1_Init();
 
-    // Initialize ICM42688
-    uint8_t init_ok = ICM42688_Init();
+    // Initialize ICM42688 (called from Task_IMU context)
+    ICM42688_Init();
+
+    // IMU raw data is read by TIM2 ISR at 1 kHz using
+    // register-level SPI (no HAL/SysTick dependency).
+    // IMU_ISR_Handler() feeds a double buffer and notifies
+    // Task_IMU via task notification.
 
     while (1) {
-        // Update sensor data (with Kalman filtering)
-        ICM42688_Update();
-
-        // Access filtered data
+        // Processed data available via queue (IMU_Data_t)
+        // or watch variables:
         float accel_x = g_imu_accel_x_filtered;  // g
         float gyro_x = g_imu_gyro_x_filtered;    // deg/s
         float temp = g_imu_temperature_c;        // °C
 
-        HAL_Delay(10);  // 100Hz update rate
+        HAL_Delay(10);
     }
 }
 ```
@@ -161,7 +166,7 @@ This project uses **FreeRTOS V10.6.2** with a comprehensive task-based architect
 
 | Task | Hardware | Frequency | Priority | Stack | Description |
 |------|----------|-----------|----------|-------|-------------|
-| **IMU** | ICM-42688-P | 1kHz | Highest | 2KB | IMU data acquisition with Kalman filter |
+| **IMU** | ICM-42688-P | 1kHz | Medium | 1KB | IMU data processing (raw read by TIM2 ISR) |
 | **Remote** | NRF24L01+ | 100Hz | High | 2KB | Remote controller data reading |
 | **EL05 Motor** | EL05 (CAN) | 100Hz | Medium-High | 2KB | Joint motor control via CAN |
 | **M0601C Motor** | M0601C (UART) | 100Hz | Medium-High | 2KB | Wheel motor control via UART |
@@ -173,20 +178,33 @@ This project uses **FreeRTOS V10.6.2** with a comprehensive task-based architect
 ### Task Communication
 
 ```
-┌─────────┐
-│ IMU     │──queue───┐
-│ (1kHz)  │            │
-└─────────┘            ▼
-                 ┌──────────┐
-┌─────────┐      │ Balance  │      ┌──────────────┐
-│ Remote  │─────►│ (500Hz)  │─────►│ EL05 Motor   │
-│ (100Hz) │      └──────────┘      │ (100Hz)      │
-└─────────┘            │            └──────────────┘
-                       │
-                       └───────────►┌──────────────┐
-                                    │ M0601C Motor │
-                                    │ (100Hz)      │
-                                    └──────────────┘
+┌────────────────┐     task notification
+│  TIM2 ISR      │──────────────────┐
+│  (1kHz, HW)    │  vTaskNotify    │
+│  Register-level│  GiveFromISR    │
+│  SPI read      │                  │
+└────────────────┘                  ▼
+                              ┌──────────┐
+                              │ IMU      │
+                              │ (process)│──queue───┐
+                              └──────────┘          │
+                                                    ▼
+┌─────────┐                              ┌──────────┐
+│ Remote  │──────────queue──────────────►│ Balance  │──┐
+│ (100Hz) │                              │ (500Hz)  │  │
+└─────────┘                              └──────────┘  │
+                                                      │
+                                    ┌─────────────────┘
+                                    ▼
+                             ┌──────────────┐
+                        ┌───►│ EL05 Motor   │
+                        │    │ (100Hz, CAN) │
+                        │    └──────────────┘
+                        │
+                        │    ┌──────────────┐
+                        └───►│ M0601C Motor │
+                             │ (100Hz, UART)│
+                             └──────────────┘
 ```
 
 ### Resource Protection
@@ -194,18 +212,20 @@ This project uses **FreeRTOS V10.6.2** with a comprehensive task-based architect
 | Resource | Mutex | Protected Tasks |
 |----------|-------|-----------------|
 | CAN Bus | `mutex_CAN` | EL05_Motor, CAN |
-| SPI1 (IMU) | `mutex_SPI1` | IMU |
 | SPI3 (NRF24L01) | `mutex_SPI3` | Remote |
 | UART1 (M0601C) | `mutex_UART1` | M0601C_Motor |
+
+> **Note**: SPI1 (IMU) is accessed only from TIM2 ISR context — no mutex needed. Register-level SPI with loop timeout avoids HAL SysTick dependency.
 
 ### Performance Metrics
 
 - **CPU Utilization**: ~20% (highly efficient)
-- **IMU Update Rate**: 1kHz (stable, non-blocking)
+- **IMU Read**: 1kHz hardware-timed by TIM2 ISR (deterministic, ±0 µs jitter)
+- **IMU Processing**: 1kHz (software filtering in Task_IMU)
 - **Balance Control**: 500Hz (real-time response)
 - **Motor Control**: 100Hz (precise control)
 - **FreeRTOS Heap**: 32KB
-- **Total Stack**: ~16KB for all tasks
+- **Total Stack**: ~14KB for all tasks
 
 ### Monitoring Variables
 
@@ -601,7 +621,8 @@ This project is developed for educational purposes as part of the 2026 Mingyue C
 
 ### 主要特性
 
-- **实时操作系统**：FreeRTOS V10.6.2，8个优先级任务
+- **实时操作系统**：FreeRTOS V10.6.2，7个优先级任务
+- **中断驱动IMU**：ICM-42688-P由TIM2硬件中断读取（1kHz，确定性时序）
 - **多电机支持**：EL05关节电机（CAN扩展帧）、M0601C轮毂电机（UART）
 - **IMU传感器**：ICM-42688-P六轴IMU，带卡尔曼滤波（SPI1）
 - **无线控制**：NRF24L01+遥控器，支持对码协议（SPI3）
@@ -709,9 +730,10 @@ MOSI        ───►   PA7 (SPI1_MOSI)
 INT1        ───►   可选（数据就绪中断）
 ```
 
-**使用示例：**
+**使用示例（中断驱动，1kHz）：**
 ```c
 #include "icm42688.h"
+#include "freertos_tasks.h"
 
 int main(void) {
     HAL_Init();
@@ -719,19 +741,20 @@ int main(void) {
     MX_GPIO_Init();
     MX_SPI1_Init();
 
-    // 初始化ICM42688
-    uint8_t init_ok = ICM42688_Init();
+    // 初始化ICM42688（在Task_IMU上下文中调用）
+    ICM42688_Init();
+
+    // IMU原始数据由TIM2硬件中断以1kHz读取，
+    // 使用寄存器级SPI操作（不依赖HAL/SysTick）。
+    // IMU_ISR_Handler() 写入双缓冲区并通过任务通知唤醒Task_IMU。
 
     while (1) {
-        // 更新传感器数据（带卡尔曼滤波）
-        ICM42688_Update();
-
-        // 访问滤波后数据
+        // 处理后的数据通过队列（IMU_Data_t）或监控变量获取：
         float accel_x = g_imu_accel_x_filtered;  // g
         float gyro_x = g_imu_gyro_x_filtered;    // deg/s
         float temp = g_imu_temperature_c;        // °C
 
-        HAL_Delay(10);  // 100Hz更新率
+        HAL_Delay(10);
     }
 }
 ```
@@ -746,7 +769,7 @@ int main(void) {
 
 | 任务 | 硬件 | 频率 | 优先级 | 栈大小 | 描述 |
 |------|------|------|--------|--------|------|
-| **IMU** | ICM-42688-P | 1kHz | 最高 | 2KB | IMU数据采集（卡尔曼滤波） |
+| **IMU** | ICM-42688-P | 1kHz | 中 | 1KB | IMU数据处理（原始读取由TIM2 ISR完成） |
 | **Remote** | NRF24L01+ | 100Hz | 高 | 2KB | 遥控器数据读取 |
 | **EL05 Motor** | EL05 (CAN) | 100Hz | 中高 | 2KB | 关节电机控制（CAN） |
 | **M0601C Motor** | M0601C (UART) | 100Hz | 中高 | 2KB | 轮毂电机控制（UART） |
@@ -758,20 +781,33 @@ int main(void) {
 ### 任务通信
 
 ```
-┌─────────┐
-│ IMU     │──队列───┐
-│ (1kHz)  │            │
-└─────────┘            ▼
-                 ┌──────────┐
-┌─────────┐      │ Balance  │      ┌──────────────┐
-│ Remote  │─────►│ (500Hz)  │─────►│ EL05 Motor   │
-│ (100Hz) │      └──────────┘      │ (100Hz)      │
-└─────────┘            │            └──────────────┘
-                       │
-                       └───────────►┌──────────────┐
-                                    │ M0601C Motor │
-                                    │ (100Hz)      │
-                                    └──────────────┘
+┌────────────────┐     任务通知
+│  TIM2 ISR      │──────────────────┐
+│  (1kHz, 硬件)  │  vTaskNotify    │
+│  寄存器级SPI   │  GiveFromISR    │
+│  读取          │                  │
+└────────────────┘                  ▼
+                              ┌──────────┐
+                              │ IMU      │
+                              │ (数据处理) │──队列───┐
+                              └──────────┘          │
+                                                    ▼
+┌─────────┐                              ┌──────────┐
+│ Remote  │──────────队列───────────────►│ Balance  │──┐
+│ (100Hz) │                              │ (500Hz)  │  │
+└─────────┘                              └──────────┘  │
+                                                      │
+                                    ┌─────────────────┘
+                                    ▼
+                             ┌──────────────┐
+                        ┌───►│ EL05 Motor   │
+                        │    │ (100Hz, CAN) │
+                        │    └──────────────┘
+                        │
+                        │    ┌──────────────┐
+                        └───►│ M0601C Motor │
+                             │ (100Hz, UART)│
+                             └──────────────┘
 ```
 
 ### 资源保护
@@ -779,18 +815,20 @@ int main(void) {
 | 资源 | 互斥量 | 保护任务 |
 |------|--------|----------|
 | CAN总线 | `mutex_CAN` | EL05_Motor, CAN |
-| SPI1 (IMU) | `mutex_SPI1` | IMU |
 | SPI3 (NRF24L01) | `mutex_SPI3` | Remote |
 | UART1 (M0601C) | `mutex_UART1` | M0601C_Motor |
+
+> **注意**：SPI1（IMU）仅在TIM2 ISR上下文中访问，无需互斥量保护。寄存器级SPI配合循环超时，不依赖HAL SysTick。
 
 ### 性能指标
 
 - **CPU利用率**：~20%（高效）
-- **IMU更新率**：1kHz（稳定，非阻塞）
+- **IMU读取**：1kHz由TIM2硬件定时（确定性，±0 µs抖动）
+- **IMU处理**：1kHz（Task_IMU中软件滤波）
 - **平衡控制**：500Hz（实时响应）
 - **电机控制**：100Hz（精确控制）
 - **FreeRTOS堆**：32KB
-- **总栈大小**：~16KB（所有任务）
+- **总栈大小**：~14KB（所有任务）
 
 ### 监控变量
 

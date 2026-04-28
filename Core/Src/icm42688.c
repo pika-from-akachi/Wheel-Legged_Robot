@@ -431,6 +431,57 @@ void ICM42688_ReadRawData(ICM42688_RawData_t *data)
     data->gyro_z = (int16_t)((buf[12] << 8) | buf[13]);
 }
 
+/**
+  * @brief Read raw sensor data via register-level SPI (ISR-safe)
+  * @note  Uses direct SPI register access with loop timeout (no HAL/SysTick).
+  *        Safe to call from interrupt context where SysTick may not increment.
+  * @param data Pointer to raw data struct to fill
+  * @retval 1 on success, 0 on SPI timeout
+  */
+uint8_t ICM42688_ReadRawData_FromISR(ICM42688_RawData_t *data)
+{
+    uint8_t buf[14];
+    uint32_t timeout;
+
+    /* Select Bank 0 via register-level SPI */
+    ICM42688_CS_LOW();
+    timeout = 10000;
+    SPI1->DR = ICM42688_REG_BANK_SEL & 0x7F;
+    while (!(SPI1->SR & SPI_SR_RXNE)) { if (--timeout == 0) { ICM42688_CS_HIGH(); return 0; } }
+    (void)SPI1->DR;
+    timeout = 10000;
+    SPI1->DR = 0;
+    while (!(SPI1->SR & SPI_SR_RXNE)) { if (--timeout == 0) { ICM42688_CS_HIGH(); return 0; } }
+    (void)SPI1->DR;
+    ICM42688_CS_HIGH();
+
+    /* Read 14 bytes: TEMP_DATA1~0 (2) + ACCEL_DATA_X1~Z0 (6) + GYRO_DATA_X1~Z0 (6) */
+    ICM42688_CS_LOW();
+    timeout = 10000;
+    SPI1->DR = ICM42688_REG_TEMP_DATA1 | 0x80;
+    while (!(SPI1->SR & SPI_SR_RXNE)) { if (--timeout == 0) { ICM42688_CS_HIGH(); return 0; } }
+    (void)SPI1->DR;
+
+    for (uint8_t i = 0; i < 14; i++) {
+        timeout = 10000;
+        SPI1->DR = 0xFF;
+        while (!(SPI1->SR & SPI_SR_RXNE)) { if (--timeout == 0) { ICM42688_CS_HIGH(); return 0; } }
+        buf[i] = (uint8_t)SPI1->DR;
+    }
+    ICM42688_CS_HIGH();
+
+    /* Parse big-endian 16-bit data */
+    data->temperature = (int16_t)((buf[0] << 8) | buf[1]);
+    data->accel_x     = (int16_t)((buf[2] << 8) | buf[3]);
+    data->accel_y     = (int16_t)((buf[4] << 8) | buf[5]);
+    data->accel_z     = (int16_t)((buf[6] << 8) | buf[7]);
+    data->gyro_x      = (int16_t)((buf[8] << 8) | buf[9]);
+    data->gyro_y      = (int16_t)((buf[10] << 8) | buf[11]);
+    data->gyro_z      = (int16_t)((buf[12] << 8) | buf[13]);
+
+    return 1;
+}
+
 void ICM42688_ReadScaledData(ICM42688_ScaledData_t *data)
 {
     ICM42688_RawData_t raw;
@@ -476,6 +527,57 @@ void ICM42688_Update(void)
     g_imu_gyro_z_raw = icm42688_handle.raw_data.gyro_z;
 
     /* Update filtered data for display */
+    g_imu_accel_x_filtered = icm42688_handle.filtered_data.accel_x_g;
+    g_imu_accel_y_filtered = icm42688_handle.filtered_data.accel_y_g;
+    g_imu_accel_z_filtered = icm42688_handle.filtered_data.accel_z_g;
+    g_imu_gyro_x_filtered = icm42688_handle.filtered_data.gyro_x_dps;
+    g_imu_gyro_y_filtered = icm42688_handle.filtered_data.gyro_y_dps;
+    g_imu_gyro_z_filtered = icm42688_handle.filtered_data.gyro_z_dps;
+}
+
+/**
+  * @brief Process raw IMU data: scale to physical units, apply filter, update debug vars
+  * @note  Designed to be called from task context after ISR reads raw data
+  * @param raw Pointer to the raw sensor data
+  */
+void ICM42688_ProcessRawData(const ICM42688_RawData_t *raw)
+{
+    ICM42688_ScaledData_t scaled;
+
+    /* Scale accelerometer: raw × sensitivity / 1000 → g */
+    scaled.accel_x_g = (float)raw->accel_x * icm42688_handle.accel_sensitivity / 1000.0f;
+    scaled.accel_y_g = (float)raw->accel_y * icm42688_handle.accel_sensitivity / 1000.0f;
+    scaled.accel_z_g = (float)raw->accel_z * icm42688_handle.accel_sensitivity / 1000.0f;
+
+    /* Scale gyroscope: raw / sensitivity → dps */
+    scaled.gyro_x_dps = (float)raw->gyro_x / icm42688_handle.gyro_sensitivity;
+    scaled.gyro_y_dps = (float)raw->gyro_y / icm42688_handle.gyro_sensitivity;
+    scaled.gyro_z_dps = (float)raw->gyro_z / icm42688_handle.gyro_sensitivity;
+
+    /* Temperature: (raw / 132.48) + 25 → °C */
+    scaled.temperature_c = ((float)raw->temperature / 132.48f) + 25.0f;
+
+    /* Store to handle */
+    icm42688_handle.scaled_data = scaled;
+    icm42688_handle.raw_data = *raw;
+
+    /* Apply filter */
+    ICM42688_ApplyFilter(&scaled, &icm42688_handle.filtered_data);
+
+    /* Update debug variables for Keil Watch Window */
+    g_imu_accel_x_g = scaled.accel_x_g;
+    g_imu_accel_y_g = scaled.accel_y_g;
+    g_imu_accel_z_g = scaled.accel_z_g;
+    g_imu_gyro_x_dps = scaled.gyro_x_dps;
+    g_imu_gyro_y_dps = scaled.gyro_y_dps;
+    g_imu_gyro_z_dps = scaled.gyro_z_dps;
+    g_imu_temperature_c = scaled.temperature_c;
+    g_imu_accel_x_raw = raw->accel_x;
+    g_imu_accel_y_raw = raw->accel_y;
+    g_imu_accel_z_raw = raw->accel_z;
+    g_imu_gyro_x_raw = raw->gyro_x;
+    g_imu_gyro_y_raw = raw->gyro_y;
+    g_imu_gyro_z_raw = raw->gyro_z;
     g_imu_accel_x_filtered = icm42688_handle.filtered_data.accel_x_g;
     g_imu_accel_y_filtered = icm42688_handle.filtered_data.accel_y_g;
     g_imu_accel_z_filtered = icm42688_handle.filtered_data.accel_z_g;

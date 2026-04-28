@@ -17,6 +17,7 @@
 /* USER CODE BEGIN Includes */
 #include "icm42688.h"
 #include "nrf24l01_rx.h"
+#include "freertos_tasks.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,39 +37,37 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
-/* Task handles */
-osThreadId_t taskHandle_IMU;              /* ICM-42688-P IMU task */
-osThreadId_t taskHandle_Remote;           /* NRF24L01+ remote controller task */
+/* ===== Shared variables (defined in freertos_tasks.c) ===== */
+extern osThreadId_t taskHandle_IMU;
+extern osThreadId_t taskHandle_Remote;
+extern osThreadId_t taskHandle_Balance;
+extern osThreadId_t taskHandle_Monitor;
+extern osThreadId_t taskHandle_Debug;
+extern osMessageQueueId_t queue_IMUData;
+extern osMessageQueueId_t queue_RemoteData;
+extern osMutexId_t mutex_CAN;
+extern osMutexId_t mutex_SPI1;
+extern osMutexId_t mutex_SPI3;
+extern osSemaphoreId_t sem_IMU_Ready;
+extern osSemaphoreId_t sem_Remote_Ready;
+extern volatile uint8_t g_system_status;
+extern volatile uint32_t g_imu_update_count;
+extern volatile uint32_t g_remote_update_count;
+
+/* ===== Unique to this file ===== */
 osThreadId_t taskHandle_EL05_Motor;       /* EL05 joint motor task */
 osThreadId_t taskHandle_M0601C_Motor;     /* M0601C wheel motor task */
 osThreadId_t taskHandle_CAN;              /* CAN communication task */
-osThreadId_t taskHandle_Balance;          /* Balance control task */
-osThreadId_t taskHandle_Monitor;          /* System monitor task */
-osThreadId_t taskHandle_Debug;            /* Debug output task */
 
-/* Queue handles */
-osMessageQueueId_t queue_IMUData;         /* IMU sensor data queue */
-osMessageQueueId_t queue_RemoteData;      /* Remote control data queue */
 osMessageQueueId_t queue_EL05_MotorCmd;   /* EL05 motor command queue */
 osMessageQueueId_t queue_M0601C_MotorCmd; /* M0601C motor command queue */
 osMessageQueueId_t queue_CAN_TX;          /* CAN TX message queue */
 osMessageQueueId_t queue_CAN_RX;          /* CAN RX message queue */
 
-/* Mutex handles */
-osMutexId_t mutex_CAN;                    /* Protect CAN bus */
-osMutexId_t mutex_SPI1;                   /* Protect SPI1 (IMU) */
-osMutexId_t mutex_SPI3;                   /* Protect SPI3 (NRF24L01) */
 osMutexId_t mutex_UART1;                  /* Protect UART1 (M0601C) */
 
-/* Semaphore handles */
-osSemaphoreId_t sem_IMU_Ready;            /* IMU data ready */
-osSemaphoreId_t sem_Remote_Ready;         /* Remote data ready */
 osSemaphoreId_t sem_CAN_RX;               /* CAN RX complete */
 
-/* Status variables */
-volatile uint8_t g_system_status = 0;
-volatile uint32_t g_imu_update_count = 0;
-volatile uint32_t g_remote_update_count = 0;
 volatile uint32_t g_el05_motor_update_count = 0;
 volatile uint32_t g_m0601c_motor_update_count = 0;
 volatile uint32_t g_can_tx_count = 0;
@@ -84,14 +83,11 @@ const osThreadAttr_t defaultTask_attributes = {
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
-void Task_IMU(void *argument);
-void Task_Remote(void *argument);
+/* Unique tasks (only defined in this file) */
 void Task_EL05_Motor(void *argument);
 void Task_M0601C_Motor(void *argument);
 void Task_CAN(void *argument);
-void Task_Balance(void *argument);
-void Task_Monitor(void *argument);
-void Task_Debug(void *argument);
+/* Other tasks (Task_IMU, Task_Remote, etc.) are declared in freertos_tasks.h */
 /* USER CODE END FunctionPrototypes */
 
 void StartDefaultTask(void *argument);
@@ -126,12 +122,12 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  queue_IMUData = osMessageQueueNew(10, sizeof(void*), NULL);
-  queue_RemoteData = osMessageQueueNew(5, sizeof(void*), NULL);
-  queue_EL05_MotorCmd = osMessageQueueNew(10, sizeof(void*), NULL);
-  queue_M0601C_MotorCmd = osMessageQueueNew(10, sizeof(void*), NULL);
-  queue_CAN_TX = osMessageQueueNew(20, sizeof(void*), NULL);
-  queue_CAN_RX = osMessageQueueNew(20, sizeof(void*), NULL);
+  queue_IMUData = osMessageQueueNew(10, sizeof(IMU_Data_t), NULL);
+  queue_RemoteData = osMessageQueueNew(5, sizeof(RemoteData_t), NULL);
+  queue_EL05_MotorCmd = osMessageQueueNew(10, sizeof(MotorCmd_t), NULL);
+  queue_M0601C_MotorCmd = osMessageQueueNew(10, sizeof(MotorCmd_t), NULL);
+  queue_CAN_TX = osMessageQueueNew(20, sizeof(CAN_TxHeaderTypeDef), NULL);
+  queue_CAN_RX = osMessageQueueNew(20, sizeof(CAN_RxHeaderTypeDef), NULL);
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -139,12 +135,12 @@ void MX_FREERTOS_Init(void) {
   /* defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes); */
 
   /* USER CODE BEGIN RTOS_THREADS */
-  /* IMU task - ICM-42688-P (1kHz, highest priority) */
+  /* IMU data processing task - ICM-42688-P (1kHz, triggered by TIM2 ISR) */
   {
     const osThreadAttr_t attr = {
       .name = "IMU_Task",
-      .stack_size = 2048,
-      .priority = (osPriority_t) osPriorityAboveNormal3,
+      .stack_size = 1024,
+      .priority = (osPriority_t) osPriorityAboveNormal,
     };
     taskHandle_IMU = osThreadNew(Task_IMU, NULL, &attr);
   }
@@ -249,64 +245,6 @@ void StartDefaultTask(void *argument)
 /* USER CODE BEGIN Application */
 
 /**
-  * @brief ICM-42688-P IMU data acquisition task (1kHz)
-  * @note  Reads IMU data with Kalman filter
-  */
-void Task_IMU(void *argument)
-{
-    (void)argument;
-
-    /* TODO: Initialize ICM-42688-P */
-    /* if (!ICM42688_Init()) {
-        g_system_status |= 0x01;
-        vTaskSuspend(NULL);
-    } */
-
-    uint32_t tick = osKernelGetTickCount();
-    for (;;)
-    {
-        /* TODO: Read IMU data with Kalman filter */
-        /* ICM42688_Update(); */
-
-        /* TODO: Send IMU data to queue */
-        /* osMessageQueuePut(queue_IMUData, &imuData, 0, 0); */
-
-        g_imu_update_count++;
-        osDelayUntil(tick + 1);
-        tick += 1;
-    }
-}
-
-/**
-  * @brief NRF24L01+ remote controller task (100Hz)
-  * @note  Reads remote control data
-  */
-void Task_Remote(void *argument)
-{
-    (void)argument;
-
-    /* TODO: Initialize NRF24L01+ */
-    /* NRF24L01_RX_Init(); */
-    /* if (!NRF24L01_RX_WaitForPairing()) {
-        g_system_status |= 0x02;
-    } */
-
-    uint32_t tick = osKernelGetTickCount();
-    for (;;)
-    {
-        /* TODO: Read remote data */
-        /* if (NRF24L01_RX_ReadData()) {
-            RemoteControlData_t *rc = NRF24L01_RX_GetData();
-            osMessageQueuePut(queue_RemoteData, &remoteData, 0, 0);
-        } */
-
-        g_remote_update_count++;
-        osDelayUntil(tick + 10);
-        tick += 10;
-    }
-}
-
-/**
   * @brief EL05 joint motor control task (100Hz)
   * @note  Controls EL05 motors via CAN extended frame
   */
@@ -385,91 +323,6 @@ void Task_CAN(void *argument)
         g_can_rx_count++;
         osDelayUntil(tick + 2);
         tick += 2;
-    }
-}
-
-/**
-  * @brief Balance control task (500Hz)
-  * @note  Implements balance algorithm using IMU and remote data
-  */
-void Task_Balance(void *argument)
-{
-    (void)argument;
-
-    uint32_t tick = osKernelGetTickCount();
-    for (;;)
-    {
-        /* TODO: Get IMU data */
-        /* osMessageQueueGet(queue_IMUData, &imuData, NULL, 2); */
-
-        /* TODO: Get remote data */
-        /* osMessageQueueGet(queue_RemoteData, &remoteData, NULL, 0); */
-
-        /* TODO: Implement balance control algorithm */
-        /* Use IMU data and remote data to calculate motor commands */
-
-        /* TODO: Send motor commands */
-        /* osMessageQueuePut(queue_EL05_MotorCmd, &motorCmd, 0, 0); */
-        /* osMessageQueuePut(queue_M0601C_MotorCmd, &motorCmd, 0, 0); */
-
-        osDelayUntil(tick + 2);
-        tick += 2;
-    }
-}
-
-/**
-  * @brief System monitor task (10Hz)
-  * @note  Monitors system status and safety
-  */
-void Task_Monitor(void *argument)
-{
-    (void)argument;
-
-    uint32_t tick = osKernelGetTickCount();
-    for (;;)
-    {
-        /* TODO: Check remote online status */
-        /* if (!NRF24L01_RX_IsOnline()) {
-            g_system_status |= 0x04;
-        } else {
-            g_system_status &= ~0x04;
-        } */
-
-        /* TODO: Check IMU status */
-        /* if (g_imu_update_count == 0) {
-            g_system_status |= 0x08;
-        } */
-
-        /* TODO: Check motor status */
-
-        /* TODO: Safety protection */
-        /* if (g_system_status != 0) {
-            Stop all motors
-        } */
-
-        osDelayUntil(tick + 100);
-        tick += 100;
-    }
-}
-
-/**
-  * @brief Debug output task (1Hz)
-  * @note  Outputs debug information via UART
-  */
-void Task_Debug(void *argument)
-{
-    (void)argument;
-
-    uint32_t tick = osKernelGetTickCount();
-    for (;;)
-    {
-        /* TODO: Output debug information */
-        /* printf("IMU: %d, Remote: %d, EL05: %d, M0601C: %d\n",
-               g_imu_update_count, g_remote_update_count,
-               g_el05_motor_update_count, g_m0601c_motor_update_count); */
-
-        osDelayUntil(tick + 1000);
-        tick += 1000;
     }
 }
 

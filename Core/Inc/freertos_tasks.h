@@ -14,6 +14,7 @@ extern "C" {
 #endif
 
 #include "main.h"
+#include "icm42688.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -22,15 +23,19 @@ extern "C" {
  * ============================================================================
  * Priority levels: 0 (lowest) to 7 (highest)
  * Higher priority tasks can preempt lower priority tasks
+ *
+ * NOTE: IMU raw data read is handled by TIM2 ISR (HW-timed 1 kHz).
+ *       Task_IMU now only does scaling/filtering, so its priority
+ *       is lowered from 6 to 3.
  * ============================================================================ */
 
 #define TASK_PRIORITY_IDLE              0   /* Idle task (lowest) */
 #define TASK_PRIORITY_DEBUG             1   /* Debug output task */
 #define TASK_PRIORITY_MONITOR           2   /* Status monitoring task */
+#define TASK_PRIORITY_IMU_PROCESS       3   /* IMU data processing (ISR does the read) */
 #define TASK_PRIORITY_REMOTE_CONTROL    3   /* Remote control task */
 #define TASK_PRIORITY_MOTOR_CONTROL     4   /* Motor control task */
 #define TASK_PRIORITY_BALANCE_CONTROL   5   /* Balance control task */
-#define TASK_PRIORITY_IMU               6   /* IMU data acquisition task (highest) */
 
 /* ============================================================================
  *                          TASK STACK SIZE DEFINITIONS
@@ -39,7 +44,7 @@ extern "C" {
  * Adjust based on task complexity and local variables
  * ============================================================================ */
 
-#define TASK_STACK_SIZE_IMU             512     /* IMU task: 2KB */
+#define TASK_STACK_SIZE_IMU             256     /* IMU processing: 1KB (ISR does the SPI read) */
 #define TASK_STACK_SIZE_BALANCE         1024    /* Balance control: 4KB */
 #define TASK_STACK_SIZE_MOTOR           512     /* Motor control: 2KB */
 #define TASK_STACK_SIZE_REMOTE          512     /* Remote control: 2KB */
@@ -52,7 +57,7 @@ extern "C" {
  * Task execution frequencies in Hz
  * ============================================================================ */
 
-#define TASK_FREQ_IMU                   1000    /* IMU: 1kHz */
+#define TASK_FREQ_IMU                   1000    /* IMU: 1kHz (timer-triggered ISR) */
 #define TASK_FREQ_BALANCE               500     /* Balance: 500Hz */
 #define TASK_FREQ_MOTOR                 100     /* Motor: 100Hz */
 #define TASK_FREQ_REMOTE                100     /* Remote: 100Hz */
@@ -152,6 +157,11 @@ void Task_Motor(void *argument);
 void Task_Remote(void *argument);
 void Task_Monitor(void *argument);
 void Task_Debug(void *argument);
+
+/* IMU ISR and timer functions */
+void IMU_ISR_Handler(void);
+void IMU_StartTimerInterrupt(void);
+ICM42688_RawData_t IMU_GetLatestRawData(void);
 
 /* Utility functions */
 void FREERTOS_Init(void);
