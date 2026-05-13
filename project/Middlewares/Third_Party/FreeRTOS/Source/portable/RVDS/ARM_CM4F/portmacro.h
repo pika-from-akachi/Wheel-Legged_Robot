@@ -29,6 +29,8 @@
 #ifndef PORTMACRO_H
 #define PORTMACRO_H
 
+#include "cmsis_compiler.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -87,8 +89,8 @@ typedef unsigned long UBaseType_t;
 																				\
 	/* Barriers are normally not required but do ensure the code is completely	\
 	within the specified behaviour for the architecture. */						\
-	__dsb( portSY_FULL_READ_WRITE );											\
-	__isb( portSY_FULL_READ_WRITE );											\
+	__DSB();																	\
+	__ISB();																	\
 }
 /*-----------------------------------------------------------*/
 
@@ -159,19 +161,18 @@ not necessary for to use this port.  They are defined so the common demo files
 #define portINLINE __inline
 
 #ifndef portFORCE_INLINE
-	#define portFORCE_INLINE __forceinline
+	#if defined(__CC_ARM) || (defined(__ARMCC_VERSION) && __ARMCC_VERSION < 6010050)
+		#define portFORCE_INLINE __forceinline
+	#else
+		#define portFORCE_INLINE __attribute__((always_inline)) __inline
+	#endif
 #endif
 
 /*-----------------------------------------------------------*/
 
 static portFORCE_INLINE void vPortSetBASEPRI( uint32_t ulBASEPRI )
 {
-	__asm
-	{
-		/* Barrier instructions are not used as this function is only used to
-		lower the BASEPRI value. */
-		msr basepri, ulBASEPRI
-	}
+	__ASM volatile("msr basepri, %0" : : "r" (ulBASEPRI) : "memory");
 }
 /*-----------------------------------------------------------*/
 
@@ -179,26 +180,18 @@ static portFORCE_INLINE void vPortRaiseBASEPRI( void )
 {
 uint32_t ulNewBASEPRI = configMAX_SYSCALL_INTERRUPT_PRIORITY;
 
-	__asm
-	{
-		/* Set BASEPRI to the max syscall priority to effect a critical
-		section. */
-		msr basepri, ulNewBASEPRI
-		dsb
-		isb
-	}
+	__ASM volatile(
+		"msr basepri, %0\n\t"
+		"dsb\n\t"
+		"isb"
+		: : "r" (ulNewBASEPRI) : "memory"
+	);
 }
 /*-----------------------------------------------------------*/
 
 static portFORCE_INLINE void vPortClearBASEPRIFromISR( void )
 {
-	__asm
-	{
-		/* Set BASEPRI to 0 so no interrupts are masked.  This function is only
-		used to lower the mask in an interrupt, so memory barriers are not 
-		used. */
-		msr basepri, #0
-	}
+	__ASM volatile("mov r0, #0\n\tmsr basepri, r0" : : : "r0", "memory");
 }
 /*-----------------------------------------------------------*/
 
@@ -206,15 +199,13 @@ static portFORCE_INLINE uint32_t ulPortRaiseBASEPRI( void )
 {
 uint32_t ulReturn, ulNewBASEPRI = configMAX_SYSCALL_INTERRUPT_PRIORITY;
 
-	__asm
-	{
-		/* Set BASEPRI to the max syscall priority to effect a critical
-		section. */
-		mrs ulReturn, basepri
-		msr basepri, ulNewBASEPRI
-		dsb
-		isb
-	}
+	__ASM volatile(
+		"mrs %0, basepri\n\t"
+		"msr basepri, %1\n\t"
+		"dsb\n\t"
+		"isb"
+		: "=r" (ulReturn) : "r" (ulNewBASEPRI) : "memory"
+	);
 
 	return ulReturn;
 }
@@ -225,11 +216,7 @@ static portFORCE_INLINE BaseType_t xPortIsInsideInterrupt( void )
 uint32_t ulCurrentInterrupt;
 BaseType_t xReturn;
 
-	/* Obtain the number of the currently executing interrupt. */
-	__asm
-	{
-		mrs ulCurrentInterrupt, ipsr
-	}
+	__ASM volatile("mrs %0, ipsr" : "=r" (ulCurrentInterrupt));
 
 	if( ulCurrentInterrupt == 0 )
 	{

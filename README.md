@@ -22,7 +22,7 @@ This project implements the embedded control system for a wheel-legged robot, de
 - **IMU Sensor**: ICM-42688-P 6-axis IMU with Kalman filter (SPI1)
 - **Wireless Control**: NRF24L01+ remote controller with pairing protocol (SPI3)
 - **Multiple Control Modes**: MIT mode, Position, Velocity, Current control
-- **Real-time Communication**: CAN 2.0 @ 500Kbps, UART @ 115200bps with DMA
+- **Real-time Communication**: CAN 2.0 @ 1Mbps, UART @ 115200bps with DMA
 - **Task Synchronization**: Message queues, mutexes, and semaphores
 - **STM32 HAL Framework**: Built with STM32CubeMX generated code
 - **Modular Architecture**: Independent driver modules for easy integration
@@ -87,7 +87,7 @@ IRQ         ───►   PC7 (optional)
 | Peak Torque | 6 N·m (5s duration) |
 | No-load Speed | 430 rpm |
 | Gear Ratio | 9:1 |
-| Communication | CAN 2.0 Extended Frame @ 500Kbps |
+| Communication | CAN 2.0 Extended Frame @ 1Mbps |
 | Control Modes | MIT, Position (PP/CSP), Velocity, Current |
 | Application | Joint motor for wheel-legged robot |
 
@@ -419,7 +419,8 @@ int main(void) {
 | `EL05_VelocityControl(motor, vel, cur_limit)` | Velocity control |
 | `EL05_CurrentControl(motor, cur)` | Current control |
 | `EL05_SetZeroPosition(motor)` | Set mechanical zero |
-| `EL05_WriteParam(motor, addr, value)` | Write parameter |
+| `EL05_WriteParam(motor, addr, value)` | Write float parameter (bytes 4-7) |
+| `EL05_WriteParamU8(motor, addr, value)` | Write uint8 parameter (byte 4, for mode sets) |
 | `EL05_ReadParam(motor, addr)` | Read parameter |
 | `EL05_GetFeedback(motor)` | Get feedback data |
 | `EL05_CheckOnline(motor, timeout)` | Check motor online status |
@@ -530,7 +531,7 @@ Output Torque = Kp × (p_des - p_actual) + Kd × (v_des - v_actual) + t_ff
 | v_des | -30 ~ 30 | rad/s |
 | kp | 0 ~ 500 | - |
 | kd | 0 ~ 5 | - |
-| t_ff | -18 ~ 18 | N·m |
+| t_ff | -6 ~ 6 | N·m |
 
 ---
 
@@ -567,8 +568,11 @@ Output Torque = Kp × (p_des - p_actual) + Kd × (v_des - v_actual) + t_ff
 | Issue | Possible Cause | Solution |
 |-------|----------------|----------|
 | Motor not moving | Power/CAN issue | Check voltage and connections |
+| Motor not moving | Wrong CAN ID | Default is 0x7F (127) |
+| Motor not moving | Parameter value offset | Write float params at data[4-7], uint8 mode at data[4] |
 | Motor oscillating | High gains | Reduce Kp and Kd values |
-| CAN communication failed | Baud rate mismatch | Verify 500Kbps setting |
+| CAN communication failed | Baud rate mismatch | Verify 1Mbps setting |
+| CAN bus errors | Wiring/termination | Check `g_can_esr` (0 = OK) |
 | Over-temperature | High load | Reduce load or duty cycle |
 | UART no response | Wrong pins | Check PB7(RX)/PA9(TX) |
 | CRC error | Signal noise | Check cable shielding |
@@ -627,7 +631,7 @@ This project is developed for educational purposes as part of the 2026 Mingyue C
 - **IMU传感器**：ICM-42688-P六轴IMU，带卡尔曼滤波（SPI1）
 - **无线控制**：NRF24L01+遥控器，支持对码协议（SPI3）
 - **多种控制模式**：MIT模式、位置控制、速度控制、电流控制
-- **实时通信**：CAN 2.0 @ 500Kbps，UART @ 115200bps（DMA模式）
+- **实时通信**：CAN 2.0 @ 1Mbps，UART @ 115200bps（DMA模式）
 - **任务同步**：消息队列、互斥量、信号量
 - **STM32 HAL框架**：基于STM32CubeMX生成的代码
 - **模块化架构**：独立驱动模块，易于集成
@@ -692,7 +696,7 @@ IRQ         ───►   PC7 (可选)
 | 峰值扭矩 | 6 N·m（持续5秒） |
 | 空载转速 | 430 rpm |
 | 减速比 | 9:1 |
-| 通信方式 | CAN 2.0扩展帧 @ 500Kbps |
+| 通信方式 | CAN 2.0扩展帧 @ 1Mbps |
 | 控制模式 | MIT、位置(PP/CSP)、速度、电流 |
 | 应用场景 | 轮足机器人关节电机 |
 
@@ -1067,7 +1071,7 @@ int main(void) {
 | v_des | -30 ~ 30 | rad/s |
 | kp | 0 ~ 500 | - |
 | kd | 0 ~ 5 | - |
-| t_ff | -18 ~ 18 | N·m |
+| t_ff | -6 ~ 6 | N·m |
 
 ---
 
@@ -1104,8 +1108,11 @@ int main(void) {
 | 问题 | 可能原因 | 解决方案 |
 |------|----------|----------|
 | 电机不转 | 电源/CAN问题 | 检查电压和连接 |
+| 电机不转 | CAN ID错误 | 默认ID为0x7F (127) |
+| 电机不转 | 参数写入格式错误 | float值放data[4-7], 模式值放data[4] |
 | 电机抖动 | 增益过高 | 降低Kp和Kd值 |
-| CAN通信失败 | 波特率不匹配 | 确认500Kbps设置 |
+| CAN通信失败 | 波特率不匹配 | 确认1Mbps设置 |
+| CAN总线错误 | 接线/终端电阻 | 检查`g_can_esr` (0=正常) |
 | 过热 | 负载过大 | 降低负载或占空比 |
 | UART无响应 | 引脚错误 | 检查PB7(RX)/PA9(TX) |
 | CRC错误 | 信号干扰 | 检查线缆屏蔽 |

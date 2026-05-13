@@ -32,8 +32,19 @@
 /* Scheduler includes. */
 #include "FreeRTOS.h"
 #include "task.h"
+#include "cmsis_compiler.h"
 
-#ifndef __TARGET_FPU_VFP
+#ifndef __weak
+#define __weak __attribute__((weak))
+#endif
+
+/* Stringification helper for inline asm macro expansion */
+#ifndef STRINGIFY
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+#endif
+
+#if !defined(__TARGET_FPU_VFP) && !defined(__ARM_FP)
 	#error This port can only be used when the project options are configured to enable hardware floating point support.
 #endif
 
@@ -232,65 +243,52 @@ static void prvTaskExitError( void )
 }
 /*-----------------------------------------------------------*/
 
-__asm void vPortSVCHandler( void )
+__attribute__((naked)) void vPortSVCHandler( void )
 {
-	PRESERVE8
-
-	/* Get the location of the current TCB. */
-	ldr	r3, =pxCurrentTCB
-	ldr r1, [r3]
-	ldr r0, [r1]
-	/* Pop the core registers. */
-	ldmia r0!, {r4-r11, r14}
-	msr psp, r0
-	isb
-	mov r0, #0
-	msr	basepri, r0
-	bx r14
+	__ASM volatile (
+		"	ldr	r3, =pxCurrentTCB\n\t"
+		"	ldr r1, [r3]\n\t"
+		"	ldr r0, [r1]\n\t"
+		"	ldmia r0!, {r4-r11, r14}\n\t"
+		"	msr psp, r0\n\t"
+		"	isb\n\t"
+		"	mov r0, #0\n\t"
+		"	msr	basepri, r0\n\t"
+		"	bx r14"
+	);
 }
 /*-----------------------------------------------------------*/
 
-__asm void prvStartFirstTask( void )
+__attribute__((naked)) void prvStartFirstTask( void )
 {
-	PRESERVE8
-
-	/* Use the NVIC offset register to locate the stack. */
-	ldr r0, =0xE000ED08
-	ldr r0, [r0]
-	ldr r0, [r0]
-	/* Set the msp back to the start of the stack. */
-	msr msp, r0
-	/* Clear the bit that indicates the FPU is in use in case the FPU was used
-	before the scheduler was started - which would otherwise result in the
-	unnecessary leaving of space in the SVC stack for lazy saving of FPU
-	registers. */
-	mov r0, #0
-	msr control, r0
-	/* Globally enable interrupts. */
-	cpsie i
-	cpsie f
-	dsb
-	isb
-	/* Call SVC to start the first task. */
-	svc 0
-	nop
-	nop
+	__ASM volatile (
+		"	ldr r0, =0xE000ED08\n\t"
+		"	ldr r0, [r0]\n\t"
+		"	ldr r0, [r0]\n\t"
+		"	msr msp, r0\n\t"
+		"	mov r0, #0\n\t"
+		"	msr control, r0\n\t"
+		"	cpsie i\n\t"
+		"	cpsie f\n\t"
+		"	dsb\n\t"
+		"	isb\n\t"
+		"	svc 0\n\t"
+		"	nop\n\t"
+		"	nop"
+	);
 }
 /*-----------------------------------------------------------*/
 
-__asm void prvEnableVFP( void )
+__attribute__((naked)) void prvEnableVFP( void )
 {
-	PRESERVE8
-
-	/* The FPU enable bits are in the CPACR. */
-	ldr.w r0, =0xE000ED88
-	ldr	r1, [r0]
-
-	/* Enable CP10 and CP11 coprocessors, then save back. */
-	orr	r1, r1, #( 0xf << 20 )
-	str r1, [r0]
-	bx	r14
-	nop
+	__ASM volatile (
+		"	ldr.w r0, =0xE000ED88\n\t"
+		"	ldr	r1, [r0]\n\t"
+		"	orr	r1, r1, #( 0xf << 20 )\n\t"
+		"	str r1, [r0]\n\t"
+		"	bx	r14\n\t"
+		"	nop"
+	);
 }
 /*-----------------------------------------------------------*/
 
@@ -436,65 +434,37 @@ void vPortExitCritical( void )
 }
 /*-----------------------------------------------------------*/
 
-__asm void xPortPendSVHandler( void )
+__attribute__((naked)) void xPortPendSVHandler( void )
 {
-	extern uxCriticalNesting;
-	extern pxCurrentTCB;
-	extern vTaskSwitchContext;
-
-	PRESERVE8
-
-	mrs r0, psp
-	isb
-	/* Get the location of the current TCB. */
-	ldr	r3, =pxCurrentTCB
-	ldr	r2, [r3]
-
-	/* Is the task using the FPU context?  If so, push high vfp registers. */
-	tst r14, #0x10
-	it eq
-	vstmdbeq r0!, {s16-s31}
-
-	/* Save the core registers. */
-	stmdb r0!, {r4-r11, r14}
-
-	/* Save the new top of stack into the first member of the TCB. */
-	str r0, [r2]
-
-	stmdb sp!, {r0, r3}
-	mov r0, #configMAX_SYSCALL_INTERRUPT_PRIORITY
-	msr basepri, r0
-	dsb
-	isb
-	bl vTaskSwitchContext
-	mov r0, #0
-	msr basepri, r0
-	ldmia sp!, {r0, r3}
-
-	/* The first item in pxCurrentTCB is the task top of stack. */
-	ldr r1, [r3]
-	ldr r0, [r1]
-
-	/* Pop the core registers. */
-	ldmia r0!, {r4-r11, r14}
-
-	/* Is the task using the FPU context?  If so, pop the high vfp registers
-	too. */
-	tst r14, #0x10
-	it eq
-	vldmiaeq r0!, {s16-s31}
-
-	msr psp, r0
-	isb
-	#ifdef WORKAROUND_PMU_CM001 /* XMC4000 specific errata */
-		#if WORKAROUND_PMU_CM001 == 1
-			push { r14 }
-			pop { pc }
-			nop
-		#endif
-	#endif
-
-	bx r14
+	__ASM volatile (
+		"	mrs r0, psp\n\t"
+		"	isb\n\t"
+		"	ldr	r3, =pxCurrentTCB\n\t"
+		"	ldr	r2, [r3]\n\t"
+		"	tst r14, #0x10\n\t"
+		"	it eq\n\t"
+		"	vstmdbeq r0!, {s16-s31}\n\t"
+		"	stmdb r0!, {r4-r11, r14}\n\t"
+		"	str r0, [r2]\n\t"
+		"	stmdb sp!, {r0, r3}\n\t"
+		"	mov r0, #" TOSTRING(configMAX_SYSCALL_INTERRUPT_PRIORITY) "\n\t"
+		"	msr basepri, r0\n\t"
+		"	dsb\n\t"
+		"	isb\n\t"
+		"	bl vTaskSwitchContext\n\t"
+		"	mov r0, #0\n\t"
+		"	msr basepri, r0\n\t"
+		"	ldmia sp!, {r0, r3}\n\t"
+		"	ldr r1, [r3]\n\t"
+		"	ldr r0, [r1]\n\t"
+		"	ldmia r0!, {r4-r11, r14}\n\t"
+		"	tst r14, #0x10\n\t"
+		"	it eq\n\t"
+		"	vldmiaeq r0!, {s16-s31}\n\t"
+		"	msr psp, r0\n\t"
+		"	isb\n\t"
+		"	bx r14"
+	);
 }
 /*-----------------------------------------------------------*/
 
@@ -716,12 +686,12 @@ void xPortSysTickHandler( void )
 #endif /* configOVERRIDE_DEFAULT_TICK_CONFIGURATION */
 /*-----------------------------------------------------------*/
 
-__asm uint32_t vPortGetIPSR( void )
+__attribute__((naked)) uint32_t vPortGetIPSR( void )
 {
-	PRESERVE8
-
-	mrs r0, ipsr
-	bx r14
+	__ASM volatile (
+		"	mrs r0, ipsr\n\t"
+		"	bx r14"
+	);
 }
 /*-----------------------------------------------------------*/
 

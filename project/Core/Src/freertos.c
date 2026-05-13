@@ -15,10 +15,12 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <string.h>
 #include "icm42688.h"
 #include "nrf24l01_rx.h"
 #include "freertos_tasks.h"
 #include "motor_driver.h"
+#include "el05_motor.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -38,22 +40,36 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
-/* ===== Shared variables (defined in freertos_tasks.c) ===== */
-extern osThreadId_t taskHandle_IMU;
-extern osThreadId_t taskHandle_Remote;
-extern osThreadId_t taskHandle_Balance;
-extern osThreadId_t taskHandle_Monitor;
-extern osThreadId_t taskHandle_Debug;
-extern osMessageQueueId_t queue_IMUData;
-extern osMessageQueueId_t queue_RemoteData;
-extern osMutexId_t mutex_CAN;
-extern osMutexId_t mutex_SPI1;
-extern osMutexId_t mutex_SPI3;
-extern osSemaphoreId_t sem_IMU_Ready;
-extern osSemaphoreId_t sem_Remote_Ready;
-extern volatile uint8_t g_system_status;
-extern volatile uint32_t g_imu_update_count;
-extern volatile uint32_t g_remote_update_count;
+/* ===== Task handles ===== */
+osThreadId_t taskHandle_IMU = NULL;
+osThreadId_t taskHandle_Balance = NULL;
+osThreadId_t taskHandle_Motor = NULL;
+osThreadId_t taskHandle_Remote = NULL;
+osThreadId_t taskHandle_Monitor = NULL;
+osThreadId_t taskHandle_Debug = NULL;
+
+/* ===== Queue handles ===== */
+osMessageQueueId_t queue_IMUData = NULL;
+osMessageQueueId_t queue_RemoteData = NULL;
+osMessageQueueId_t queue_MotorCmd = NULL;
+
+/* ===== Mutex handles ===== */
+osMutexId_t mutex_CAN = NULL;
+osMutexId_t mutex_SPI1 = NULL;
+osMutexId_t mutex_SPI3 = NULL;
+
+/* ===== Semaphore handles ===== */
+osSemaphoreId_t sem_IMU_Ready = NULL;
+osSemaphoreId_t sem_Remote_Ready = NULL;
+
+/* ===== Status variables ===== */
+volatile uint8_t g_system_status = 0;
+volatile uint32_t g_imu_update_count = 0;
+volatile uint32_t g_remote_update_count = 0;
+
+/* ===== Double buffer for ISR→Task IMU data transfer ===== */
+static ICM42688_RawData_t g_imu_raw_buf[2];
+static volatile uint32_t g_imu_raw_active_idx = 0;
 
 /* ===== Unique to this file ===== */
 osThreadId_t taskHandle_EL05_Motor;       /* EL05 joint motor task */
@@ -73,6 +89,9 @@ volatile uint32_t g_el05_motor_update_count = 0;
 volatile uint32_t g_m0601c_motor_update_count = 0;
 volatile uint32_t g_can_tx_count = 0;
 volatile uint32_t g_can_rx_count = 0;
+
+/* External motor handles */
+extern EL05_MotorHandle_t motor1;
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -129,6 +148,7 @@ void MX_FREERTOS_Init(void) {
   queue_M0601C_MotorCmd = osMessageQueueNew(10, sizeof(MotorCmd_t), NULL);
   queue_CAN_TX = osMessageQueueNew(20, sizeof(CAN_TxHeaderTypeDef), NULL);
   queue_CAN_RX = osMessageQueueNew(20, sizeof(CAN_RxHeaderTypeDef), NULL);
+  queue_MotorCmd = osMessageQueueNew(10, sizeof(MotorCmd_t), NULL);
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -246,32 +266,83 @@ void StartDefaultTask(void *argument)
 /* USER CODE BEGIN Application */
 
 /**
-  * @brief EL05 joint motor control task (100Hz)
-  * @note  Controls EL05 motors via CAN extended frame
+  * @brief EL05 motor — MIT torque control via private protocol type 1
   */
 void Task_EL05_Motor(void *argument)
 {
+    EL05_MitControl_t mit;
+    uint32_t tick;
+    uint8_t initialized = 0;
+
     (void)argument;
 
-    /* TODO: Initialize EL05 motor driver */
-    /* EL05_Init(&hcan1); */
-    /* EL05_StartReception(); */
+    osDelay(200);
+    tick = osKernelGetTickCount();
 
-    uint32_t tick = osKernelGetTickCount();
     for (;;)
     {
-        /* TODO: Receive motor command from queue */
-        /* if (osMessageQueueGet(queue_EL05_MotorCmd, &motorCmd, NULL, 10) == osOK) {
+        if (!initialized) {
+            /* Set run_mode = 0 (MIT/运控模式) */
             osMutexAcquire(mutex_CAN, osWaitForever);
-            EL05_MitControl(&motor, &cmd);
+            EL05_WriteParamU8(&motor1, 0x7005, 0);
             osMutexRelease(mutex_CAN);
-        } */
+            osDelay(5);
+
+            /* Enable motor */
+            osMutexAcquire(mutex_CAN, osWaitForever);
+            EL05_Enable(&motor1);
+            osMutexRelease(mutex_CAN);
+            osDelay(10);
+
+            /* Write current limit */
+            osMutexAcquire(mutex_CAN, osWaitForever);
+            EL05_WriteParam(&motor1, 0x7018, 5.0f);
+            osMutexRelease(mutex_CAN);
+
+            initialized = 1;
+        }
+
+        /* MIT control: torque-only mode (like RS01 move_control with T=5) */
+        mit.p_des = 0.0f;     /* target position */
+        mit.v_des = 3.0f;     /* target velocity */
+        mit.kp    = 0.0f;     /* no position stiffness */
+        mit.kd    = 0.5f;     /* light damping */
+        mit.t_ff  = 1.0f;     /* feedforward torque */
+
+        osMutexAcquire(mutex_CAN, osWaitForever);
+        EL05_MitControl(&motor1, &mit);
+        osMutexRelease(mutex_CAN);
 
         g_el05_motor_update_count++;
         osDelayUntil(tick + 10);
         tick += 10;
     }
 }
+
+/**
+  * @brief CAN debug variables
+  */
+volatile uint32_t g_can_esr = 0;
+volatile uint32_t g_can_tsr = 0;
+
+/**
+  * @brief Raw CAN RX capture (updated for EVERY received frame)
+  */
+volatile uint32_t g_can_rx_raw_id = 0;
+volatile uint8_t  g_can_rx_raw_ide = 0;
+volatile uint8_t  g_can_rx_raw_dlc = 0;
+volatile uint8_t  g_can_rx_raw_data0 = 0;
+
+/**
+  * @brief Motor feedback capture (updated by CAN RX callback)
+  */
+volatile int16_t g_motor_fb_pos_int = 0;
+volatile int16_t g_motor_fb_vel_int = 0;
+volatile int16_t g_motor_fb_trq_int = 0;
+volatile uint16_t g_motor_fb_temp_int = 0;
+volatile uint8_t  g_motor_fb_fault = 0;
+volatile uint8_t  g_motor_fb_id = 0;
+volatile uint8_t  g_motor_fb_mode_state = 0;
 
 /**
   * @brief M0601C wheel motor control task (50Hz)
@@ -371,17 +442,14 @@ void Task_CAN(void *argument)
 {
     (void)argument;
 
-    /* TODO: Initialize CAN */
-    /* HAL_CAN_Start(&hcan1); */
-    /* HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING); */
-
     uint32_t tick = osKernelGetTickCount();
     for (;;)
     {
-        /* TODO: Process CAN TX queue */
-        /* osMutexAcquire(mutex_CAN, osWaitForever); */
-        /* Process CAN messages */
-        /* osMutexRelease(mutex_CAN); */
+        /* Sample CAN error/status registers for debugging */
+        if (hcan1.Instance) {
+            g_can_esr = hcan1.Instance->ESR;   /* Error Status Register */
+            g_can_tsr = hcan1.Instance->TSR;   /* Transmit Status Register */
+        }
 
         g_can_tx_count++;
         g_can_rx_count++;
@@ -404,4 +472,212 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
     for (;;);
 }
 
+/* ============================================================================
+ *                          IMU ISR GLUE CODE
+ * ============================================================================ */
+
+/**
+  * @brief Start TIM2 for precise 1 kHz IMU read interrupts
+  */
+void IMU_StartTimerInterrupt(void)
+{
+    __HAL_RCC_TIM2_CLK_ENABLE();
+
+    TIM2->PSC = 84 - 1;
+    TIM2->ARR = 1000 - 1;
+    TIM2->DIER |= TIM_DIER_UIE;
+
+    HAL_NVIC_SetPriority(TIM2_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(TIM2_IRQn);
+
+    TIM2->CR1 |= TIM_CR1_CEN;
+}
+
+/**
+  * @brief IMU ISR handler — called from TIM2_IRQHandler
+  */
+void IMU_ISR_Handler(void)
+{
+    ICM42688_RawData_t raw;
+
+    if (ICM42688_ReadRawData_FromISR(&raw)) {
+        uint32_t idx = g_imu_raw_active_idx;
+        g_imu_raw_buf[idx] = raw;
+        g_imu_raw_active_idx ^= 1;
+
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        vTaskNotifyGiveFromISR(taskHandle_IMU, &xHigherPriorityTaskWoken);
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    }
+}
+
+/**
+  * @brief Get the latest raw data from the double buffer
+  */
+ICM42688_RawData_t IMU_GetLatestRawData(void)
+{
+    return g_imu_raw_buf[g_imu_raw_active_idx ^ 1];
+}
+
+/* ============================================================================
+ *                          TASK IMPLEMENTATIONS
+ * ============================================================================ */
+
+/**
+  * @brief IMU data processing task
+  */
+void Task_IMU(void *argument)
+{
+    IMU_Data_t imuData;
+
+    (void)argument;
+
+    if (!ICM42688_Init()) {
+        g_system_status |= 0x01;
+        vTaskSuspend(NULL);
+    }
+
+    IMU_StartTimerInterrupt();
+
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        ICM42688_RawData_t raw = IMU_GetLatestRawData();
+        ICM42688_ProcessRawData(&raw);
+
+        imuData.accel_x_g = g_imu_accel_x_filtered;
+        imuData.accel_y_g = g_imu_accel_y_filtered;
+        imuData.accel_z_g = g_imu_accel_z_filtered;
+        imuData.gyro_x_dps = g_imu_gyro_x_filtered;
+        imuData.gyro_y_dps = g_imu_gyro_y_filtered;
+        imuData.gyro_z_dps = g_imu_gyro_z_filtered;
+        imuData.temperature_c = g_imu_temperature_c;
+        imuData.timestamp = osKernelGetTickCount();
+
+        osMessageQueuePut(queue_IMUData, &imuData, 0, 0);
+        osSemaphoreRelease(sem_IMU_Ready);
+
+        g_imu_update_count++;
+    }
+}
+
+/**
+  * @brief Balance control task (high priority, 500Hz)
+  */
+void Task_Balance(void *argument)
+{
+    IMU_Data_t imuData;
+    MotorCmd_t motorCmd;
+    uint32_t tick_start;
+    osStatus_t status;
+
+    (void)argument;
+
+    tick_start = osKernelGetTickCount();
+
+    for (;;) {
+        status = osMessageQueueGet(queue_IMUData, &imuData, NULL, 2);
+
+        if (status == osOK) {
+            motorCmd.motor_id = 1;
+            motorCmd.position = 0.0f;
+            motorCmd.velocity = 0.0f;
+            motorCmd.torque = 0.0f;
+            motorCmd.mode = 0;
+            motorCmd.timestamp = osKernelGetTickCount();
+
+            osMessageQueuePut(queue_MotorCmd, &motorCmd, 0, 0);
+        }
+
+        osDelayUntil(tick_start + 2);
+        tick_start += 2;
+    }
+}
+
+/**
+  * @brief Remote control task (100Hz)
+  */
+void Task_Remote(void *argument)
+{
+    RemoteData_t remoteData;
+    RemoteControlData_t *rc;
+    uint32_t tick_start;
+
+    (void)argument;
+
+    NRF24L01_RX_Init();
+
+    if (!NRF24L01_RX_WaitForPairing()) {
+        g_system_status |= 0x02;
+    }
+
+    tick_start = osKernelGetTickCount();
+
+    for (;;) {
+        if (NRF24L01_RX_ReadData()) {
+            rc = NRF24L01_RX_GetData();
+
+            remoteData.right_x = (int16_t)rc->right_joystick_x - 128;
+            remoteData.right_y = (int16_t)rc->right_joystick_y - 128;
+            remoteData.left_x = (int16_t)rc->left_joystick_x - 128;
+            remoteData.left_y = (int16_t)rc->left_joystick_y - 128;
+            remoteData.buttons = rc->button_state;
+            remoteData.online = NRF24L01_RX_IsOnline();
+            remoteData.timestamp = osKernelGetTickCount();
+
+            osMessageQueuePut(queue_RemoteData, &remoteData, 0, 0);
+            osSemaphoreRelease(sem_Remote_Ready);
+
+            g_remote_update_count++;
+        }
+
+        osDelayUntil(tick_start + 10);
+        tick_start += 10;
+    }
+}
+
+/**
+  * @brief System monitoring task (10Hz)
+  */
+void Task_Monitor(void *argument)
+{
+    uint32_t tick_start;
+
+    (void)argument;
+
+    tick_start = osKernelGetTickCount();
+
+    for (;;) {
+        if (!NRF24L01_RX_IsOnline()) {
+            g_system_status |= 0x04;
+        }
+
+        if (g_imu_update_count == 0) {
+            g_system_status |= 0x08;
+        }
+
+        osDelayUntil(tick_start + 100);
+        tick_start += 100;
+    }
+}
+
+/**
+  * @brief Debug output task (1Hz)
+  */
+void Task_Debug(void *argument)
+{
+    uint32_t tick_start;
+
+    (void)argument;
+
+    tick_start = osKernelGetTickCount();
+
+    for (;;) {
+        osDelayUntil(tick_start + 1000);
+        tick_start += 1000;
+    }
+}
+
 /* USER CODE END Application */
+
+/* FREERTOS_END_OF_FILE */

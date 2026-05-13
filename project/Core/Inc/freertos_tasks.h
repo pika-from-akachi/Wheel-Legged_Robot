@@ -14,6 +14,7 @@ extern "C" {
 #endif
 
 #include "main.h"
+#include "cmsis_os2.h"
 #include "icm42688.h"
 #include <stdint.h>
 #include <stdbool.h>

@@ -27,6 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include "nrf24l01_rx.h"
 #include "icm42688.h"
+#include "el05_motor.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -103,6 +104,26 @@ extern volatile uint8_t g_debug_rf_ch;
 extern volatile uint8_t g_debug_config_after_switch;
 extern volatile uint8_t g_debug_ce_after_switch;
 extern volatile uint8_t g_debug_new_address_sent[5];
+
+// EL05电机句柄
+EL05_MotorHandle_t motor1;
+
+// M0601C电机UART句柄（由MX_USART1_UART_Init初始化）
+UART_HandleTypeDef huart1;
+
+// M0601C电机驱动调试变量（供motor_driver.c链接）
+typedef struct {
+    uint8_t rxCpltCallback;
+    uint8_t crcError;
+    uint8_t rxBufRaw[10];
+    uint8_t rxBufValid;
+    uint8_t lastCrcCalc;
+    uint8_t lastCrcRecv;
+} DebugInfo_t;
+uint8_t g_rxCpltCallback = 0;
+uint8_t g_crcError = 0;
+uint8_t g_rxBufRaw[10] = {0};
+DebugInfo_t g_debug = {0};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -152,6 +173,13 @@ int main(void)
   /* USER CODE BEGIN 2 */
   /* FreeRTOS tasks will handle all initialization and control */
   /* Do not initialize peripherals here - tasks will do it */
+
+  /* 初始化EL05电机驱动 */
+  EL05_Init(&hcan1);
+  motor1.can_id = 0x7F;
+  motor1.mode = EL05_MODE_MIT;
+  motor1.state = EL05_STATE_DISABLE;
+  motor1.is_online = 0;
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -221,7 +249,22 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+/* Stub HAL_UART_Transmit — M0601C motor driver not used in this test */
+HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *huart,
+                                     const uint8_t *pData, uint16_t Size,
+                                     uint32_t Timeout)
+{
+    (void)huart; (void)pData; (void)Size; (void)Timeout;
+    return HAL_OK;
+}
 
+/* Stub HAL_UART_Receive_DMA — M0601C motor driver not used in this test */
+HAL_StatusTypeDef HAL_UART_Receive_DMA(UART_HandleTypeDef *huart,
+                                        uint8_t *pData, uint16_t Size)
+{
+    (void)huart; (void)pData; (void)Size;
+    return HAL_OK;
+}
 /* USER CODE END 4 */
 
 /**

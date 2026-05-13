@@ -93,7 +93,7 @@ static HAL_StatusTypeDef EL05_SendCANFrame(uint32_t ext_id, uint8_t *data, uint8
     uint32_t start_tick = HAL_GetTick();
     while (HAL_CAN_GetTxMailboxesFreeLevel(g_hcan) == 0) {
         if ((HAL_GetTick() - start_tick) > 100) {
-            return HAL_TIMEOUT;  // Timeout waiting for free mailbox
+            return HAL_TIMEOUT;
         }
     }
 
@@ -176,14 +176,14 @@ HAL_StatusTypeDef EL05_MitControl(EL05_MotorHandle_t *motor, EL05_MitControl_t *
 
     // Pack data: high byte first (big-endian)
     uint8_t data[8];
-    data[0] = (p_uint >> 8) & 0xFF;  // p_des high byte
-    data[1] = p_uint & 0xFF;          // p_des low byte
-    data[2] = (v_uint >> 8) & 0xFF;  // v_des high byte
-    data[3] = v_uint & 0xFF;          // v_des low byte
-    data[4] = (kp_uint >> 8) & 0xFF; // kp high byte
-    data[5] = kp_uint & 0xFF;         // kp low byte
-    data[6] = (kd_uint >> 8) & 0xFF; // kd high byte
-    data[7] = kd_uint & 0xFF;         // kd low byte
+    data[0] = (p_uint >> 8) & 0xFF;
+    data[1] = p_uint & 0xFF;
+    data[2] = (v_uint >> 8) & 0xFF;
+    data[3] = v_uint & 0xFF;
+    data[4] = (kp_uint >> 8) & 0xFF;
+    data[5] = kp_uint & 0xFF;
+    data[6] = (kd_uint >> 8) & 0xFF;
+    data[7] = kd_uint & 0xFF;
 
     // Build ExtID: mode=1, data2=t_ff_uint, id=motor_id
     uint32_t ext_id = EL05_BuildExtId(1, t_uint, motor->can_id);
@@ -219,11 +219,11 @@ HAL_StatusTypeDef EL05_WriteParam(EL05_MotorHandle_t *motor, uint16_t param_addr
     uint32_t ext_id = EL05_BuildExtId(18, EL05_MASTER_ID, motor->can_id);
     uint8_t data[8] = {0};
 
-    // Parameter address: low byte first (RS01 compatible)
+    // Parameter address: low byte first
     data[0] = param_addr & 0xFF;
     data[1] = (param_addr >> 8) & 0xFF;
 
-    // Bytes 2-3: padding (RS01 protocol expectation)
+    // Bytes 2-3: padding
     data[2] = 0x00;
     data[3] = 0x00;
 
@@ -279,16 +279,6 @@ void EL05_CAN_RxCallback(CAN_HandleTypeDef *hcan)
         return;
     }
 
-    // Capture EVERY received frame for debugging (regardless of type)
-    extern volatile uint32_t g_can_rx_raw_id;
-    extern volatile uint8_t g_can_rx_raw_ide;
-    extern volatile uint8_t g_can_rx_raw_dlc;
-    extern volatile uint8_t g_can_rx_raw_data0;
-    g_can_rx_raw_id = (rx_header.IDE == CAN_ID_EXT) ? rx_header.ExtId : rx_header.StdId;
-    g_can_rx_raw_ide = (uint8_t)rx_header.IDE;
-    g_can_rx_raw_dlc = rx_header.DLC;
-    g_can_rx_raw_data0 = rx_data[0];
-
     // Only process extended frames
     if (rx_header.IDE != CAN_ID_EXT) {
         return;
@@ -302,12 +292,12 @@ void EL05_CAN_RxCallback(CAN_HandleTypeDef *hcan)
         return;
     }
 
-    // Extract motor ID from Bit15~8 (RS01 protocol: response ID is in upper byte)
+    // Extract motor ID from Bit7~0
     uint8_t motor_id = (rx_header.ExtId >> 8) & 0xFF;
 
-    // Find motor handle by can_id (check extern motor1)
+    // Find motor handle by can_id
     extern EL05_MotorHandle_t motor1;
-    EL05_MotorHandle_t *motor = &motor1;
+    EL05_MotorHandle_t *motor = &el05_motor1;
     if (motor->can_id != motor_id) {
         return;
     }
@@ -339,26 +329,9 @@ void EL05_CAN_RxCallback(CAN_HandleTypeDef *hcan)
     motor->last_update_time = HAL_GetTick();
     motor->is_online = 1;
 
-    // Update state based on fault
     if (motor->feedback.fault != 0) {
         motor->state = EL05_STATE_ERROR;
     }
-
-    // Capture raw feedback into global debug variables
-    extern volatile int16_t g_motor_fb_pos_int;
-    extern volatile int16_t g_motor_fb_vel_int;
-    extern volatile int16_t g_motor_fb_trq_int;
-    extern volatile uint16_t g_motor_fb_temp_int;
-    extern volatile uint8_t  g_motor_fb_fault;
-    extern volatile uint8_t  g_motor_fb_id;
-    extern volatile uint8_t  g_motor_fb_mode_state;
-    g_motor_fb_pos_int = (int16_t)((rx_data[2] << 8) | rx_data[3]);
-    g_motor_fb_vel_int = (int16_t)((rx_data[4] << 8) | rx_data[5]);
-    g_motor_fb_trq_int = (int16_t)((rx_data[6] << 8) | rx_data[7]);
-    g_motor_fb_temp_int = (rx_header.ExtId >> 8) & 0xFFFF;
-    g_motor_fb_fault = rx_data[1];
-    g_motor_fb_id = (rx_data[0] >> 4) & 0x0F;
-    g_motor_fb_mode_state = rx_data[0] & 0x0F;
 }
 
 EL05_MotorFeedback_t* EL05_GetFeedback(EL05_MotorHandle_t *motor)
