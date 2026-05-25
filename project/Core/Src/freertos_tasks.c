@@ -405,12 +405,11 @@ void Task_Motor(void *argument)
 
 /**
   * @brief ESP32 communication task (medium-low priority)
-  * @note  Runs at 50Hz, handles UART data exchange with ESP32-S3
+  * @note  Runs at 100Hz, handles UART data exchange with ESP32-S3
   */
 void Task_ESP32_COM(void *argument)
 {
     uint32_t tick_start;
-    uint32_t last_state_send = 0;
 
     (void)argument;
 
@@ -422,27 +421,24 @@ void Task_ESP32_COM(void *argument)
     tick_start = osKernelGetTickCount();
 
     for (;;) {
-        /* Send state data to ESP32 at 20Hz */
-        if (osKernelGetTickCount() - last_state_send >= 50) {
-            osMutexAcquire(mutex_UART_ESP32, osWaitForever);
-            ESP32_COM_SendStateData();
-            osMutexRelease(mutex_UART_ESP32);
-            last_state_send = osKernelGetTickCount();
+        /* Send state data to ESP32 every cycle (100Hz) */
+        osMutexAcquire(mutex_UART_ESP32, osWaitForever);
+        ESP32_COM_SendStateData();
+        osMutexRelease(mutex_UART_ESP32);
 
-            /* Send heartbeat every 50 cycles (~1 second) */
-            static uint32_t hb_count = 0;
-            if (++hb_count >= 20) {
-                ESP32_COM_SendAck(ESP32_ERR_NONE);
-                hb_count = 0;
-            }
+        /* Send heartbeat every 100 cycles (~1 second) */
+        static uint32_t hb_count = 0;
+        if (++hb_count >= 100) {
+            ESP32_COM_SendAck(ESP32_ERR_NONE);
+            hb_count = 0;
         }
 
         /* Update counters */
         g_esp32_packet_count++;
 
-        /* Delay until next cycle (50Hz) */
-        osDelayUntil(tick_start + 20);
-        tick_start += 20;
+        /* Delay until next cycle (100Hz) */
+        osDelayUntil(tick_start + 10);
+        tick_start += 10;
     }
 }
 

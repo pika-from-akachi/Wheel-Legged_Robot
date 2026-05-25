@@ -479,12 +479,12 @@ static void uart_to_ws_task(void *arg)
     int len;
 
     while (1) {
-        len = uart_read_bytes(UART_STM_PORT, data, sizeof(data), pdMS_TO_TICKS(10));
+        len = uart_read_bytes(UART_STM_PORT, data, sizeof(data), pdMS_TO_TICKS(1));
         if (len > 0) {
             /* Broadcast to all WebSocket clients */
             ws_broadcast(data, len);
         }
-        vTaskDelay(pdMS_TO_TICKS(5));
+        taskYIELD();
     }
 }
 
