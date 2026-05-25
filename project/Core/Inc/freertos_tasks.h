@@ -32,10 +32,12 @@ extern "C" {
 
 #define TASK_PRIORITY_IDLE              0   /* Idle task (lowest) */
 #define TASK_PRIORITY_DEBUG             1   /* Debug output task */
+#define TASK_PRIORITY_ESP32_COM         1   /* ESP32 communication task */
 #define TASK_PRIORITY_MONITOR           2   /* Status monitoring task */
-#define TASK_PRIORITY_IMU_PROCESS       3   /* IMU data processing (ISR does the read) */
 #define TASK_PRIORITY_REMOTE_CONTROL    3   /* Remote control task */
+#define TASK_PRIORITY_IMU_PROCESS       3   /* IMU data processing (ISR does the read) */
 #define TASK_PRIORITY_MOTOR_CONTROL     4   /* Motor control task */
+#define TASK_PRIORITY_LQR_CONTROL       5   /* LQR control task (high freq) */
 #define TASK_PRIORITY_BALANCE_CONTROL   5   /* Balance control task */
 
 /* ============================================================================
@@ -47,9 +49,11 @@ extern "C" {
 
 #define TASK_STACK_SIZE_IMU             256     /* IMU processing: 1KB (ISR does the SPI read) */
 #define TASK_STACK_SIZE_BALANCE         1024    /* Balance control: 4KB */
+#define TASK_STACK_SIZE_LQR             1024    /* LQR control: 4KB */
 #define TASK_STACK_SIZE_MOTOR           512     /* Motor control: 2KB */
 #define TASK_STACK_SIZE_REMOTE          512     /* Remote control: 2KB */
 #define TASK_STACK_SIZE_MONITOR         256     /* Monitor task: 1KB */
+#define TASK_STACK_SIZE_ESP32_COM       512     /* ESP32 communication: 2KB */
 #define TASK_STACK_SIZE_DEBUG           256     /* Debug task: 1KB */
 
 /* ============================================================================
@@ -59,9 +63,11 @@ extern "C" {
  * ============================================================================ */
 
 #define TASK_FREQ_IMU                   1000    /* IMU: 1kHz (timer-triggered ISR) */
+#define TASK_FREQ_LQR                   1000    /* LQR: 1kHz */
 #define TASK_FREQ_BALANCE               500     /* Balance: 500Hz */
-#define TASK_FREQ_MOTOR                 100     /* Motor: 100Hz */
+#define TASK_FREQ_MOTOR                 200     /* Motor: 200Hz (6 motors) */
 #define TASK_FREQ_REMOTE                100     /* Remote: 100Hz */
+#define TASK_FREQ_ESP32_COM             50      /* ESP32: 50Hz */
 #define TASK_FREQ_MONITOR               10      /* Monitor: 10Hz */
 #define TASK_FREQ_DEBUG                 1       /* Debug: 1Hz */
 
@@ -73,7 +79,8 @@ extern "C" {
 
 #define QUEUE_SIZE_IMU_DATA             10      /* IMU data queue */
 #define QUEUE_SIZE_REMOTE_DATA          5       /* Remote control data queue */
-#define QUEUE_SIZE_MOTOR_CMD            10      /* Motor command queue */
+#define QUEUE_SIZE_MOTOR_CMD            20      /* Motor command queue (6 motors) */
+#define QUEUE_SIZE_ESP32_CMD            10      /* ESP32 command queue */
 
 /* ============================================================================
  *                          DATA STRUCTURES
@@ -125,8 +132,10 @@ typedef struct {
 /* Task handles */
 extern osThreadId_t taskHandle_IMU;
 extern osThreadId_t taskHandle_Balance;
+extern osThreadId_t taskHandle_LQR;
 extern osThreadId_t taskHandle_Motor;
 extern osThreadId_t taskHandle_Remote;
+extern osThreadId_t taskHandle_ESP32_COM;
 extern osThreadId_t taskHandle_Monitor;
 extern osThreadId_t taskHandle_Debug;
 
@@ -134,11 +143,14 @@ extern osThreadId_t taskHandle_Debug;
 extern osMessageQueueId_t queue_IMUData;
 extern osMessageQueueId_t queue_RemoteData;
 extern osMessageQueueId_t queue_MotorCmd;
+extern osMessageQueueId_t queue_ESP32Cmd;
 
 /* Mutex handles */
 extern osMutexId_t mutex_CAN;
 extern osMutexId_t mutex_SPI1;
 extern osMutexId_t mutex_SPI3;
+extern osMutexId_t mutex_UART_ESP32;
+extern osMutexId_t mutex_RS485;
 
 /* Semaphore handles */
 extern osSemaphoreId_t sem_IMU_Ready;
@@ -154,8 +166,10 @@ void FREERTOS_CreateTasks(void);
 /* Individual task functions */
 void Task_IMU(void *argument);
 void Task_Balance(void *argument);
+void Task_LQR(void *argument);
 void Task_Motor(void *argument);
 void Task_Remote(void *argument);
+void Task_ESP32_COM(void *argument);
 void Task_Monitor(void *argument);
 void Task_Debug(void *argument);
 

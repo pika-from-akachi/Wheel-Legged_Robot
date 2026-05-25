@@ -8,10 +8,15 @@
 #include "freertos_tasks.h"
 #include "icm42688.h"
 #include "nrf24l01_rx.h"
+#include "el05_motor.h"
+#include "m0601c_motor.h"
+#include "lqr_control.h"
+#include "esp32_com.h"
 #include "cmsis_os2.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include <string.h>
+#include <math.h>
 
 /* ============================================================================
  *                          EXTERNAL VARIABLES
@@ -37,8 +42,10 @@ extern volatile float g_imu_temperature_c;
 /* Task handles */
 osThreadId_t taskHandle_IMU = NULL;
 osThreadId_t taskHandle_Balance = NULL;
+osThreadId_t taskHandle_LQR = NULL;
 osThreadId_t taskHandle_Motor = NULL;
 osThreadId_t taskHandle_Remote = NULL;
+osThreadId_t taskHandle_ESP32_COM = NULL;
 osThreadId_t taskHandle_Monitor = NULL;
 osThreadId_t taskHandle_Debug = NULL;
 
@@ -46,11 +53,14 @@ osThreadId_t taskHandle_Debug = NULL;
 osMessageQueueId_t queue_IMUData = NULL;
 osMessageQueueId_t queue_RemoteData = NULL;
 osMessageQueueId_t queue_MotorCmd = NULL;
+osMessageQueueId_t queue_ESP32Cmd = NULL;
 
 /* Mutex handles */
 osMutexId_t mutex_CAN = NULL;
 osMutexId_t mutex_SPI1 = NULL;
 osMutexId_t mutex_SPI3 = NULL;
+osMutexId_t mutex_UART_ESP32 = NULL;
+osMutexId_t mutex_RS485 = NULL;
 
 /* Semaphore handles */
 osSemaphoreId_t sem_IMU_Ready = NULL;
@@ -61,6 +71,13 @@ volatile uint8_t g_system_status = 0;
 volatile uint32_t g_imu_update_count = 0;
 volatile uint32_t g_remote_update_count = 0;
 volatile uint32_t g_motor_update_count = 0;
+volatile uint32_t g_lqr_update_count = 0;
+volatile uint32_t g_esp32_packet_count = 0;
+
+/* Global LQR controller and tuning params */
+LQR_Controller_t g_lqr_controller;
+LQR_TuningParams_t g_lqr_tuning;
+RobotState_t g_robot_state;
 
 /* Double buffer for ISR→Task IMU data transfer */
 static ICM42688_RawData_t g_imu_raw_buf[2];
@@ -194,19 +211,52 @@ void Task_Balance(void *argument)
         status = osMessageQueueGet(queue_IMUData, &imuData, NULL, 2);
 
         if (status == osOK) {
-            /* TODO: Implement balance control algorithm here */
-            /* Example: PID control based on IMU data */
+            /* Update robot state from IMU */
+            g_robot_state.dq_body = imuData.gyro_x_dps * 0.017453f; /* deg/s to rad/s */
 
-            /* Prepare motor commands */
-            motorCmd.motor_id = 1;
-            motorCmd.position = 0.0f;      /* Target position */
-            motorCmd.velocity = 0.0f;      /* Target velocity */
-            motorCmd.torque = 0.0f;        /* Target torque */
-            motorCmd.mode = 0;             /* MIT mode */
-            motorCmd.timestamp = osKernelGetTickCount();
+            /* Estimate body angle from accel (complementary filter) */
+            static float body_angle = 0.0f;
+            float accel_angle = atan2f(imuData.accel_y_g, imuData.accel_z_g);
+            float gyro_rate = imuData.gyro_x_dps * 0.017453f;
+            static uint32_t last_tick = 0;
+            float dt = (osKernelGetTickCount() - last_tick) * 0.001f;
+            if (dt > 0.001f && dt < 0.1f) {
+                body_angle = 0.98f * (body_angle + gyro_rate * dt) + 0.02f * accel_angle;
+            }
+            last_tick = osKernelGetTickCount();
+            g_robot_state.q_body = body_angle;
 
-            /* Send motor command to queue */
-            osMessageQueuePut(queue_MotorCmd, &motorCmd, 0, 0);
+            /* Send motor commands for balance */
+            if (g_lqr_controller.enabled) {
+                BalanceState_t bal = ROBOT_ExtractBalanceState(&g_robot_state);
+                LQR_Update(&g_lqr_controller, &bal, 0.002f);
+
+                /* Distribute LQR output to 4 joint motors */
+                float joint_torque = g_lqr_controller.u[0];
+                float wheel_torque = g_lqr_controller.u[1];
+
+                /* Left side */
+                motorCmd.motor_id = ROBOT_EL05_ID_HIP_L;
+                motorCmd.position = 0.0f;
+                motorCmd.velocity = 0.0f;
+                motorCmd.torque = joint_torque * 0.5f;
+                motorCmd.mode = EL05_MODE_MIT;
+                motorCmd.timestamp = osKernelGetTickCount();
+                osMessageQueuePut(queue_MotorCmd, &motorCmd, 0, 0);
+
+                motorCmd.motor_id = ROBOT_EL05_ID_KNEE_L;
+                motorCmd.torque = joint_torque * 0.5f;
+                osMessageQueuePut(queue_MotorCmd, &motorCmd, 0, 0);
+
+                /* Right side */
+                motorCmd.motor_id = ROBOT_EL05_ID_HIP_R;
+                motorCmd.torque = joint_torque * 0.5f;
+                osMessageQueuePut(queue_MotorCmd, &motorCmd, 0, 0);
+
+                motorCmd.motor_id = ROBOT_EL05_ID_KNEE_R;
+                motorCmd.torque = joint_torque * 0.5f;
+                osMessageQueuePut(queue_MotorCmd, &motorCmd, 0, 0);
+            }
         }
 
         /* Delay until next cycle (500Hz) */
@@ -216,12 +266,57 @@ void Task_Balance(void *argument)
 }
 
 /**
+  * @brief LQR control task (high priority)
+  * @note  Runs at 1kHz, dedicated LQR computation and safety monitoring
+  */
+void Task_LQR(void *argument)
+{
+    BalanceState_t balance_state;
+    uint32_t tick_start;
+
+    (void)argument;
+
+    /* Initialize LQR controller */
+    LQR_Init(&g_lqr_controller);
+    LQR_SetDefaultTuning(&g_lqr_tuning);
+    LQR_ComputeGains(&g_lqr_tuning, &g_lqr_controller.gain);
+    ROBOT_Init();
+    ROBOT_ResetState(&g_robot_state);
+
+    tick_start = osKernelGetTickCount();
+
+    for (;;) {
+        /* Extract balance state from robot state */
+        balance_state = ROBOT_ExtractBalanceState(&g_robot_state);
+
+        /* Safety check */
+        if (!LQR_CheckSafety(&g_lqr_controller, &balance_state)) {
+            if (g_lqr_controller.enabled) {
+                LQR_EmergencyStop(&g_lqr_controller);
+                g_system_status |= 0x10; /* LQR safety trigger */
+            }
+        }
+
+        /* Process ESP32 packets (non-blocking) */
+        ESP32_COM_Update();
+
+        /* Update counters */
+        g_lqr_update_count++;
+
+        /* Delay until next cycle (1kHz) */
+        osDelayUntil(tick_start + 1);
+        tick_start += 1;
+    }
+}
+
+/**
   * @brief Motor control task (medium priority)
-  * @note  Runs at 100Hz, sends commands to motors via CAN
+  * @note  Runs at 200Hz, sends commands to all 6 motors (4 EL05 CAN + 2 M0601C RS485)
   */
 void Task_Motor(void *argument)
 {
     MotorCmd_t motorCmd;
+    EL05_MitControl_t mit_cmd;
     uint32_t tick_start;
     osStatus_t status;
 
@@ -229,27 +324,84 @@ void Task_Motor(void *argument)
 
     tick_start = osKernelGetTickCount();
 
-    for (;;) {
-        /* Wait for motor command (max 10ms timeout) */
-        status = osMessageQueueGet(queue_MotorCmd, &motorCmd, NULL, 10);
+    /* Extern motor handles */
+    extern EL05_MotorHandle_t g_el05_motors[4];
+    extern M0601C_MotorHandle_t g_m0601c_motors[2];
 
-        if (status == osOK) {
-            /* Lock CAN mutex */
+    for (;;) {
+        /* Process all pending motor commands */
+        while (osMessageQueueGet(queue_MotorCmd, &motorCmd, NULL, 0) == osOK) {
             osMutexAcquire(mutex_CAN, osWaitForever);
 
-            /* TODO: Send motor command via CAN */
-            /* Example: EL05_MitControl(&motor, &cmd); */
+            /* EL05 Joint Motors (CAN, IDs 1-4) */
+            if (motorCmd.motor_id >= 1 && motorCmd.motor_id <= 4) {
+                uint8_t idx = motorCmd.motor_id - 1;
+                mit_cmd.p_des = motorCmd.position;
+                mit_cmd.v_des = motorCmd.velocity;
+                mit_cmd.kp = 20.0f;
+                mit_cmd.kd = 0.5f;
+                mit_cmd.t_ff = motorCmd.torque;
+                EL05_MitControl(&g_el05_motors[idx], &mit_cmd);
+            }
 
-            /* Unlock CAN mutex */
             osMutexRelease(mutex_CAN);
-
-            /* Update counter */
             g_motor_update_count++;
         }
 
-        /* Delay until next cycle (100Hz) */
-        osDelayUntil(tick_start + 10);
-        tick_start += 10;
+        /* Poll M0601C feedback (every cycle) */
+        osMutexAcquire(mutex_RS485, osWaitForever);
+        for (int i = 0; i < 2; i++) {
+            M0601C_RequestFeedback(&g_m0601c_motors[i]);
+            HAL_Delay(1);  /* Small delay between requests */
+        }
+        osMutexRelease(mutex_RS485);
+
+        /* Delay until next cycle (200Hz) */
+        osDelayUntil(tick_start + 5);
+        tick_start += 5;
+    }
+}
+
+/**
+  * @brief ESP32 communication task (medium-low priority)
+  * @note  Runs at 50Hz, handles UART data exchange with ESP32-S3
+  */
+void Task_ESP32_COM(void *argument)
+{
+    uint32_t tick_start;
+    uint32_t last_state_send = 0;
+
+    (void)argument;
+
+    /* Initialize ESP32 communication */
+    extern UART_HandleTypeDef huart3;
+    ESP32_COM_Init(&huart3);
+    ESP32_COM_StartRx();
+
+    tick_start = osKernelGetTickCount();
+
+    for (;;) {
+        /* Send state data to ESP32 at 20Hz */
+        if (osKernelGetTickCount() - last_state_send >= 50) {
+            osMutexAcquire(mutex_UART_ESP32, osWaitForever);
+            ESP32_COM_SendStateData();
+            osMutexRelease(mutex_UART_ESP32);
+            last_state_send = osKernelGetTickCount();
+
+            /* Send heartbeat every 50 cycles (~1 second) */
+            static uint32_t hb_count = 0;
+            if (++hb_count >= 20) {
+                ESP32_COM_SendAck(ESP32_ERR_NONE);
+                hb_count = 0;
+            }
+        }
+
+        /* Update counters */
+        g_esp32_packet_count++;
+
+        /* Delay until next cycle (50Hz) */
+        osDelayUntil(tick_start + 20);
+        tick_start += 20;
     }
 }
 
@@ -374,17 +526,22 @@ void FREERTOS_CreateTasks(void)
     queue_IMUData = osMessageQueueNew(QUEUE_SIZE_IMU_DATA, sizeof(IMU_Data_t), NULL);
     queue_RemoteData = osMessageQueueNew(QUEUE_SIZE_REMOTE_DATA, sizeof(RemoteData_t), NULL);
     queue_MotorCmd = osMessageQueueNew(QUEUE_SIZE_MOTOR_CMD, sizeof(MotorCmd_t), NULL);
+    queue_ESP32Cmd = osMessageQueueNew(QUEUE_SIZE_ESP32_CMD, sizeof(uint8_t) * 20, NULL);
 
     /* Create mutexes */
     mutex_CAN = osMutexNew(NULL);
     mutex_SPI1 = osMutexNew(NULL);
     mutex_SPI3 = osMutexNew(NULL);
+    mutex_UART_ESP32 = osMutexNew(NULL);
+    mutex_RS485 = osMutexNew(NULL);
 
     /* Create semaphores */
     sem_IMU_Ready = osSemaphoreNew(1, 0, NULL);
     sem_Remote_Ready = osSemaphoreNew(1, 0, NULL);
 
     /* Create tasks */
+
+    /* IMU task */
     const osThreadAttr_t attr_IMU = {
         .name = "IMU_Task",
         .stack_size = TASK_STACK_SIZE_IMU * 4,
@@ -392,6 +549,15 @@ void FREERTOS_CreateTasks(void)
     };
     taskHandle_IMU = osThreadNew(Task_IMU, NULL, &attr_IMU);
 
+    /* LQR control task (1kHz) */
+    const osThreadAttr_t attr_LQR = {
+        .name = "LQR_Task",
+        .stack_size = TASK_STACK_SIZE_LQR * 4,
+        .priority = TASK_PRIORITY_LQR_CONTROL
+    };
+    taskHandle_LQR = osThreadNew(Task_LQR, NULL, &attr_LQR);
+
+    /* Balance control task (500Hz) */
     const osThreadAttr_t attr_Balance = {
         .name = "Balance_Task",
         .stack_size = TASK_STACK_SIZE_BALANCE * 4,
@@ -399,6 +565,7 @@ void FREERTOS_CreateTasks(void)
     };
     taskHandle_Balance = osThreadNew(Task_Balance, NULL, &attr_Balance);
 
+    /* Motor control task (200Hz) */
     const osThreadAttr_t attr_Motor = {
         .name = "Motor_Task",
         .stack_size = TASK_STACK_SIZE_MOTOR * 4,
@@ -406,6 +573,7 @@ void FREERTOS_CreateTasks(void)
     };
     taskHandle_Motor = osThreadNew(Task_Motor, NULL, &attr_Motor);
 
+    /* Remote control task (100Hz) */
     const osThreadAttr_t attr_Remote = {
         .name = "Remote_Task",
         .stack_size = TASK_STACK_SIZE_REMOTE * 4,
@@ -413,6 +581,15 @@ void FREERTOS_CreateTasks(void)
     };
     taskHandle_Remote = osThreadNew(Task_Remote, NULL, &attr_Remote);
 
+    /* ESP32 communication task (50Hz) */
+    const osThreadAttr_t attr_ESP32 = {
+        .name = "ESP32_COM_Task",
+        .stack_size = TASK_STACK_SIZE_ESP32_COM * 4,
+        .priority = TASK_PRIORITY_ESP32_COM
+    };
+    taskHandle_ESP32_COM = osThreadNew(Task_ESP32_COM, NULL, &attr_ESP32);
+
+    /* Monitor task (10Hz) */
     const osThreadAttr_t attr_Monitor = {
         .name = "Monitor_Task",
         .stack_size = TASK_STACK_SIZE_MONITOR * 4,
@@ -420,6 +597,7 @@ void FREERTOS_CreateTasks(void)
     };
     taskHandle_Monitor = osThreadNew(Task_Monitor, NULL, &attr_Monitor);
 
+    /* Debug task (1Hz) */
     const osThreadAttr_t attr_Debug = {
         .name = "Debug_Task",
         .stack_size = TASK_STACK_SIZE_DEBUG * 4,

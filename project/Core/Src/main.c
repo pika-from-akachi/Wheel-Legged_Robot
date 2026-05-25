@@ -28,6 +28,10 @@
 #include "nrf24l01_rx.h"
 #include "icm42688.h"
 #include "el05_motor.h"
+#include "m0601c_motor.h"
+#include "lqr_control.h"
+#include "robot_model.h"
+#include "esp32_com.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -105,32 +109,25 @@ extern volatile uint8_t g_debug_config_after_switch;
 extern volatile uint8_t g_debug_ce_after_switch;
 extern volatile uint8_t g_debug_new_address_sent[5];
 
-// EL05电机句柄
-EL05_MotorHandle_t motor1;
+// EL05电机句柄 (4个关节电机)
+EL05_MotorHandle_t g_el05_motors[4];
 
-// M0601C电机UART句柄（由MX_USART1_UART_Init初始化）
+// M0601C电机句柄数组 (2个轮毂电机)
+M0601C_MotorHandle_t g_m0601c_motors[2];
+
+// M0601C电机UART句柄（RS485 via USART1）
 UART_HandleTypeDef huart1;
 
-// M0601C电机驱动调试变量（供motor_driver.c链接）
-typedef struct {
-    uint8_t rxCpltCallback;
-    uint8_t crcError;
-    uint8_t rxBufRaw[10];
-    uint8_t rxBufValid;
-    uint8_t lastCrcCalc;
-    uint8_t lastCrcRecv;
-} DebugInfo_t;
-uint8_t g_rxCpltCallback = 0;
-uint8_t g_crcError = 0;
-uint8_t g_rxBufRaw[10] = {0};
-DebugInfo_t g_debug = {0};
+// ESP32通信UART句柄（USART3, PB10=TX, PB11=RX）
+UART_HandleTypeDef huart3;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
-
+void MX_USART1_UART_Init(void);
+void MX_USART3_UART_Init(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -171,21 +168,45 @@ int main(void)
   MX_SPI3_Init();
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
-  /* FreeRTOS tasks will handle all initialization and control */
-  /* Do not initialize peripherals here - tasks will do it */
+  /* Initialize all motor drivers and communication peripherals */
 
-  /* 初始化EL05电机驱动 */
+  /* ===== EL05 Joint Motors (CAN, IDs 1-4) ===== */
   EL05_Init(&hcan1);
-  motor1.can_id = 0x7F;
-  motor1.mode = EL05_MODE_MIT;
-  motor1.state = EL05_STATE_DISABLE;
-  motor1.is_online = 0;
 
-  /* 设置挂载在总线的电机ID为2（参照例程SampleProgram的Set_CAN_ID方式） */
-  if (EL05_SetMotorId(&motor1, 4) == HAL_OK) {
-      HAL_Delay(50);      /* 等待CAN帧发送完成 */
-      motor1.can_id = 4;  /* 更新本地句柄以匹配电机新ID */
+  uint8_t el05_ids[4] = {1, 2, 3, 4};
+  for (int i = 0; i < 4; i++) {
+      g_el05_motors[i].can_id = el05_ids[i];
+      g_el05_motors[i].mode = EL05_MODE_MIT;
+      g_el05_motors[i].state = EL05_STATE_DISABLE;
+      g_el05_motors[i].is_online = 0;
   }
+
+  /* ===== M0601C Hub Motors (RS485, IDs 1-2) ===== */
+  /* Initialize USART1 for RS485 (PB6=TX, PB7=RX), PE0=DIR control */
+  MX_USART1_UART_Init();
+  M0601C_Init(&huart1, GPIOE, GPIO_PIN_0);
+
+  for (int i = 0; i < 2; i++) {
+      g_m0601c_motors[i].id = i + 1;
+      g_m0601c_motors[i].mode = M0601C_MODE_IDLE;
+      g_m0601c_motors[i].state = M0601C_STATE_DISABLED;
+      g_m0601c_motors[i].is_online = false;
+  }
+
+  /* ===== ESP32 Communication (USART3, PB10=TX, PB11=RX) ===== */
+  MX_USART3_UART_Init();
+  ESP32_COM_Init(&huart3);
+  ESP32_COM_StartRx();
+
+  /* ===== Robot Model & LQR Initialization ===== */
+  ROBOT_Init();
+  LQR_Init(&g_lqr_controller);
+  LQR_SetDefaultTuning(&g_lqr_tuning);
+  LQR_ComputeGains(&g_lqr_tuning, &g_lqr_controller.gain);
+
+  /* Default to standing mode (disabled, waiting for enable command) */
+  LQR_SetMode(&g_lqr_controller, ROBOT_MODE_STANDING);
+
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -255,21 +276,126 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-/* Stub HAL_UART_Transmit — M0601C motor driver not used in this test */
-HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *huart,
-                                     const uint8_t *pData, uint16_t Size,
-                                     uint32_t Timeout)
+
+/* ============================================================================
+ *                          USART1 INIT (M0601C RS485)
+ * ============================================================================
+ * PB6 = USART1_TX, PB7 = USART1_RX
+ * PE0 = RS485 Direction Control (DE/RE)
+ * Baud rate: 115200, 8N1
+ * ============================================================================ */
+
+void MX_USART1_UART_Init(void)
 {
-    (void)huart; (void)pData; (void)Size; (void)Timeout;
-    return HAL_OK;
+    /* Enable clocks */
+    __HAL_RCC_USART1_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    __HAL_RCC_GPIOE_CLK_ENABLE();
+
+    /* Configure USART1 pins: PB6=TX, PB7=RX */
+    GPIO_InitTypeDef gpio = {0};
+    gpio.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+    gpio.Mode = GPIO_MODE_AF_PP;
+    gpio.Pull = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    gpio.Alternate = GPIO_AF7_USART1;
+    HAL_GPIO_Init(GPIOB, &gpio);
+
+    /* Configure RS485 direction pin: PE0 */
+    gpio.Pin = GPIO_PIN_0;
+    gpio.Mode = GPIO_MODE_OUTPUT_PP;
+    gpio.Pull = GPIO_PULLDOWN;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    gpio.Alternate = 0;
+    HAL_GPIO_Init(GPIOE, &gpio);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_0, GPIO_PIN_RESET); /* Default RX */
+
+    /* UART configuration */
+    huart1.Instance = USART1;
+    huart1.Init.BaudRate = 115200;
+    huart1.Init.WordLength = UART_WORDLENGTH_8B;
+    huart1.Init.StopBits = UART_STOPBITS_1;
+    huart1.Init.Parity = UART_PARITY_NONE;
+    huart1.Init.Mode = UART_MODE_TX_RX;
+    huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+    if (HAL_UART_Init(&huart1) != HAL_OK) {
+        Error_Handler();
+    }
+
+    /* Enable USART1 interrupt for RS485 byte reception */
+    HAL_NVIC_SetPriority(USART1_IRQn, 6, 0);
+    HAL_NVIC_EnableIRQ(USART1_IRQn);
+    __HAL_UART_ENABLE_IT(&huart1, UART_IT_RXNE);
 }
 
-/* Stub HAL_UART_Receive_DMA — M0601C motor driver not used in this test */
-HAL_StatusTypeDef HAL_UART_Receive_DMA(UART_HandleTypeDef *huart,
-                                        uint8_t *pData, uint16_t Size)
+/* ============================================================================
+ *                          USART3 INIT (ESP32 COMMUNICATION)
+ * ============================================================================
+ * PB10 = USART3_TX, PB11 = USART3_RX
+ * Baud rate: 921600 (high speed for real-time control data)
+ * ============================================================================ */
+
+void MX_USART3_UART_Init(void)
 {
-    (void)huart; (void)pData; (void)Size;
-    return HAL_OK;
+    /* Enable clocks */
+    __HAL_RCC_USART3_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    /* Configure USART3 pins: PB10=TX, PB11=RX */
+    GPIO_InitTypeDef gpio = {0};
+    gpio.Pin = GPIO_PIN_10 | GPIO_PIN_11;
+    gpio.Mode = GPIO_MODE_AF_PP;
+    gpio.Pull = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    gpio.Alternate = GPIO_AF7_USART3;
+    HAL_GPIO_Init(GPIOB, &gpio);
+
+    /* UART configuration */
+    huart3.Instance = USART3;
+    huart3.Init.BaudRate = 921600;
+    huart3.Init.WordLength = UART_WORDLENGTH_8B;
+    huart3.Init.StopBits = UART_STOPBITS_1;
+    huart3.Init.Parity = UART_PARITY_NONE;
+    huart3.Init.Mode = UART_MODE_TX_RX;
+    huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+    if (HAL_UART_Init(&huart3) != HAL_OK) {
+        Error_Handler();
+    }
+
+    /* Enable USART3 interrupt */
+    HAL_NVIC_SetPriority(USART3_IRQn, 6, 0);
+    HAL_NVIC_EnableIRQ(USART3_IRQn);
+    __HAL_UART_ENABLE_IT(&huart3, UART_IT_RXNE);
+}
+
+/* ============================================================================
+ *                          UART INTERRUPT HANDLERS
+ * ============================================================================ */
+
+/**
+ * @brief USART1 IRQ handler - M0601C RS485 byte reception
+ */
+void USART1_IRQHandler(void)
+{
+    if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_RXNE)) {
+        uint8_t byte = (uint8_t)(huart1.Instance->DR & 0xFF);
+        M0601C_RS485_RxCallback(byte);
+        __HAL_UART_CLEAR_FLAG(&huart1, UART_FLAG_RXNE);
+    }
+}
+
+/**
+ * @brief USART3 IRQ handler - ESP32 communication byte reception
+ */
+void USART3_IRQHandler(void)
+{
+    if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_RXNE)) {
+        uint8_t byte = (uint8_t)(huart3.Instance->DR & 0xFF);
+        ESP32_COM_UART_IRQHandler(byte);
+        __HAL_UART_CLEAR_FLAG(&huart3, UART_FLAG_RXNE);
+    }
 }
 /* USER CODE END 4 */
 

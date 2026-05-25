@@ -16,16 +16,18 @@ This project implements the embedded control system for a wheel-legged robot, de
 
 ### Key Features
 
-- **Real-Time Operating System**: FreeRTOS V10.6.2 with 7 priority-based tasks
+- **Real-Time Operating System**: FreeRTOS V10.6.2 with 8 priority-based tasks
 - **Interrupt-Driven IMU**: ICM-42688-P read by TIM2 hardware interrupt (1 kHz, deterministic timing)
-- **Multi-Motor Support**: EL05 joint motor (CAN extended frame), M0601C wheel motor (UART)
+- **Multi-Motor Support**: EL05 joint motor (CAN extended frame), M0601C wheel motor (RS485)
+- **LQR Control Framework**: Linear Quadratic Regulator balancing with gain scheduling
+- **Dual MCU Architecture**: STM32F407 (control) + ESP32-S3 (wireless tuning bridge)
+- **Wireless Tuning App**: Alpine.js + Three.js 3D visualization with real-time parameter adjustment
+- **3D Visualization**: Real-time robot state monitoring via Three.js
 - **IMU Sensor**: ICM-42688-P 6-axis IMU with Kalman filter (SPI1)
 - **Wireless Control**: NRF24L01+ remote controller with pairing protocol (SPI3)
 - **Multiple Control Modes**: MIT mode, Position, Velocity, Current control
-- **Real-time Communication**: CAN 2.0 @ 1Mbps, UART @ 115200bps with DMA
-- **Task Synchronization**: Message queues, mutexes, and semaphores
-- **STM32 HAL Framework**: Built with STM32CubeMX generated code
-- **Modular Architecture**: Independent driver modules for easy integration
+- **Real-time Communication**: CAN 2.0 @ 1Mbps, RS485 @ 115200bps, UART @ 921600bps
+- **Remote Parameter Tuning**: Wireless LQR gain adjustment via ESP32-S3 web interface
 
 ---
 
@@ -38,10 +40,24 @@ This project implements the embedded control system for a wheel-legged robot, de
 | MCU | STM32F407IGHx (UFBGA176 package) |
 | Core | ARM Cortex-M4 @ 168 MHz with FPU |
 | CAN Interface | CAN1 (PD0: CAN_RX, PD1: CAN_TX) |
+| RS485 Interface | USART1 (PB6: TX, PB7: RX) with PE0 direction control |
+| ESP32 Interface | USART3 (PB10: TX, PB11: RX) @ 921600 baud |
 | UART Interface | USART1 (PB7: RX, PA9: TX) with DMA |
 | SPI Interface | SPI1 (PA5: SCK, PA6: MISO, PA7: MOSI, PA4: CS) for IMU<br>SPI3 (PC10: SCK, PC11: MISO, PC12: MOSI) for NRF24L01 |
 | Debug Interface | SWD (PA13: SWDIO, PA14: SWCLK) |
 | External Oscillator | 8 MHz HSE |
+
+### Wireless Tuning Module
+
+| Component | Specification |
+|-----------|---------------|
+| MCU | ESP32-S3 |
+| WiFi | 2.4GHz 802.11 b/g/n, AP mode |
+| AP SSID | WheelRobot-Tuning |
+| AP Password | 12345678 |
+| Web Interface | Alpine.js + Three.js 3D visualization |
+| Protocol | WebSocket for real-time data |
+| UART | TX: GPIO43, RX: GPIO44 @ 921600 baud |
 
 ### Supported Motors and Modules
 
@@ -166,14 +182,14 @@ This project uses **FreeRTOS V10.6.2** with a comprehensive task-based architect
 
 | Task | Hardware | Frequency | Priority | Stack | Description |
 |------|----------|-----------|----------|-------|-------------|
-| **IMU** | ICM-42688-P | 1kHz | Medium | 1KB | IMU data processing (raw read by TIM2 ISR) |
-| **Remote** | NRF24L01+ | 100Hz | High | 2KB | Remote controller data reading |
-| **EL05 Motor** | EL05 (CAN) | 100Hz | Medium-High | 2KB | Joint motor control via CAN |
-| **M0601C Motor** | M0601C (UART) | 100Hz | Medium-High | 2KB | Wheel motor control via UART |
-| **CAN** | CAN Bus | 500Hz | High | 2KB | CAN communication management |
-| **Balance** | Control Algorithm | 500Hz | High | 4KB | Balance control algorithm |
-| **Monitor** | System Safety | 10Hz | Low | 1KB | System status monitoring |
-| **Debug** | Diagnostics | 1Hz | Lowest | 1KB | Debug output |
+| **IMU** | ICM-42688-P | 1kHz | Medium (3) | 1KB | IMU data processing (raw read by TIM2 ISR) |
+| **LQR** | Control Algorithm | 1kHz | High (5) | 4KB | LQR state feedback & safety monitoring |
+| **Balance** | Control Algorithm | 500Hz | High (5) | 4KB | Balance control, state estimation, complementary filter |
+| **Motor** | EL05 + M0601C | 200Hz | Medium-High (4) | 2KB | Motor command processing for all 6 motors |
+| **Remote** | NRF24L01+ | 100Hz | Medium (3) | 2KB | Remote controller data reading |
+| **ESP32 COM** | ESP32-S3 (UART3) | 50Hz | Low (1) | 2KB | Wireless tuning bridge & state broadcast |
+| **Monitor** | System Safety | 10Hz | Low (2) | 1KB | System status monitoring |
+| **Debug** | Diagnostics | 1Hz | Lowest (1) | 1KB | Debug output |
 
 ### Task Communication
 
@@ -211,11 +227,188 @@ This project uses **FreeRTOS V10.6.2** with a comprehensive task-based architect
 
 | Resource | Mutex | Protected Tasks |
 |----------|-------|-----------------|
-| CAN Bus | `mutex_CAN` | EL05_Motor, CAN |
+| CAN Bus | `mutex_CAN` | Motor, LQR, Balance |
 | SPI3 (NRF24L01) | `mutex_SPI3` | Remote |
-| UART1 (M0601C) | `mutex_UART1` | M0601C_Motor |
+| UART1 / RS485 (M0601C) | `mutex_RS485` | Motor |
+| UART3 (ESP32) | `mutex_UART_ESP32` | ESP32_COM |
 
 > **Note**: SPI1 (IMU) is accessed only from TIM2 ISR context — no mutex needed. Register-level SPI with loop timeout avoids HAL SysTick dependency.
+
+---
+
+## LQR Control Framework
+
+The system implements a **Linear Quadratic Regulator (LQR)** for wheel-legged robot balancing based on a reduced-order inverted-pendulum-on-wheels model.
+
+### State Space Model
+
+**Reduced state vector (4-dim):**
+```
+x = [body_angle, body_rate, wheel_position, wheel_velocity]^T
+```
+
+**Control input (2-dim):**
+```
+u = [joint_torque, wheel_torque]^T
+```
+
+**Control law:**
+```
+u = -K * x + Ki * integral(body_angle_error)
+```
+
+### LQR Weights
+
+| Weight | Parameter | Default | Effect |
+|--------|-----------|---------|--------|
+| Q₁₁ | Body angle | 100 | Stiffness of balance |
+| Q₂₂ | Body rate | 10 | Damping of body motion |
+| Q₃₃ | Wheel position | 1 | Position regulation |
+| Q₄₄ | Wheel velocity | 1 | Speed damping |
+| R₁₁ | Joint torque effort | 0.1 | Joint energy cost |
+| R₂₂ | Wheel torque effort | 0.5 | Wheel energy cost |
+| Kᵢ | Integral gain | 0.5 | Steady-state error removal |
+
+### Gain Scheduling
+
+| Mode | Description | Application |
+|------|-------------|-------------|
+| Standing | High stiffness, aggressive balance | Upright balancing |
+| Driving | Reduced stiffness, allows forward motion | Locomotion |
+| Sitting | Zero output, motors idle | Resting/startup |
+| Emergency Stop | Immediate disable with braking | Safety |
+
+### Key Files
+
+- `Core/Inc/lqr_control.h` - LQR controller API
+- `Core/Src/lqr_control.c` - LQR implementation (Riccati solver, state feedback)
+- `Core/Inc/robot_model.h` - Robot kinematics and dynamics model
+- `Core/Src/robot_model.c` - Model implementation (linearized dynamics)
+
+---
+
+## ESP32-S3 Wireless Tuning System
+
+The dual-MCU architecture enables wireless real-time parameter tuning via an ESP32-S3 coprocessor.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    User's Phone/PC                       │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │  Web Browser (Alpine.js + Three.js)              │   │
+│  │  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │   │
+│  │  │ Parameter│  │  3D Robot│  │  Telemetry    │  │   │
+│  │  │ Panel    │  │  Viewer  │  │  Dashboard    │  │   │
+│  │  └────┬─────┘  └────┬─────┘  └──────┬────────┘  │   │
+│  │       └──────────────┼───────────────┘           │   │
+│  └──────────────────────┼───────────────────────────┘   │
+│                         │ WebSocket                     │
+│                         ▼                               │
+│              ┌─────────────────────┐                    │
+│              │   ESP32-S3 (AP)     │                    │
+│              │  WiFi: WheelRobot-  │                    │
+│              │  Tuning             │                    │
+│              │  HTTP + WebSocket   │                    │
+│              └──────────┬──────────┘                    │
+│                         │ UART3 @ 921600                │
+│                         ▼                               │
+│              ┌─────────────────────┐                    │
+│              │   STM32F407         │                    │
+│              │  LQR Control        │                    │
+│              │  Motor Drivers      │                    │
+│              │  IMU Processing     │                    │
+│              └─────────────────────┘                    │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Communication Protocol
+
+UART3 packet format (binary):
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 1 | Start byte 1 (0xAA) |
+| 1 | 1 | Start byte 2 (0xBB) |
+| 2 | 1 | Packet type |
+| 3 | 1 | Payload length |
+| 4 | N | Payload data |
+| 4+N | 2 | CRC-16 (CCITT) |
+
+**Command types:**
+- `0x01` - Set LQR tuning parameters
+- `0x02` - Request robot state
+- `0x03` - Set control mode
+- `0x04` - Enable/Disable motors
+- `0x06` - Heartbeat
+- `0x20` - System reset
+
+### Key Files
+
+- `Core/Inc/esp32_com.h` - ESP32 communication protocol API
+- `Core/Src/esp32_com.c` - Protocol implementation (packet encoding/decoding, CRC)
+- `esp32_app/` - ESP32-S3 firmware project (ESP-IDF)
+
+### ESP32-S3 Firmware Build
+
+```bash
+cd esp32_app/
+idf.py set-target esp32s3
+idf.py menuconfig    # Configure WiFi, SPIFFS
+idf.py build
+idf.py -p PORT flash
+```
+
+### Web Frontend
+
+The wireless tuning interface is a single-page application built with:
+
+| Technology | Purpose |
+|------------|---------|
+| **Alpine.js** | Reactive UI framework |
+| **Three.js** | 3D robot visualization with OrbitControls |
+| **WebSocket** | Real-time bidirectional data exchange |
+
+**Features:**
+- 3D robot model visualization with real-time state updates
+- LQR parameter sliders (Q and R matrix weights)
+- Control mode selection (Standing, Driving, Sitting, Calibration)
+- Real-time telemetry display (IMU, motor status, control output)
+- Connection status monitoring with auto-reconnect
+- Responsive design for desktop and mobile
+
+**Access:**
+1. Connect to WiFi SSID: `WheelRobot-Tuning` (password: `12345678`)
+2. Open browser to `http://192.168.4.1`
+3. 3D viewport and tuning controls load automatically
+
+### Web Frontend Files
+
+- `esp32_app/data/index.html` - Complete tuning application (Alpine.js + Three.js)
+- Served from ESP32-S3 SPIFFS partition
+
+---
+
+## Motor Configuration
+
+### EL05 Joint Motors (CAN Bus)
+
+| Motor ID | Location | CAN ID | Type |
+|----------|----------|--------|------|
+| M1 | Left Hip | 1 | EL05 |
+| M2 | Left Knee | 2 | EL05 |
+| M3 | Right Hip | 3 | EL05 |
+| M4 | Right Knee | 4 | EL05 |
+
+### M0601C Hub Motors (RS485 Bus)
+
+| Motor ID | Location | RS485 ID | Type |
+|----------|----------|----------|------|
+| M5 | Left Wheel | 1 | M0601C |
+| M6 | Right Wheel | 2 | M0601C |
+
+---
 
 ### Performance Metrics
 
@@ -291,6 +484,18 @@ Wheel-Legged_Robot/
 ├── Drivers/                           # STM32 HAL & CMSIS libraries
 ├── MDK-ARM/                           # Keil MDK project files
 ├── EWARM/                             # IAR EWARM project files
+### Key Files Added in v2.0 (LQR + Wireless Tuning):
+
+| File | Description |
+|------|-------------|
+| `Core/Inc/m0601c_motor.h` / `Core/Src/m0601c_motor.c` | M0601C RS485 motor driver with CRC-8 |
+| `Core/Inc/lqr_control.h` / `Core/Src/lqr_control.c` | LQR control algorithm framework |
+| `Core/Inc/robot_model.h` / `Core/Src/robot_model.c` | Robot kinematics and dynamics model |
+| `Core/Inc/esp32_com.h` / `Core/Src/esp32_com.c` | ESP32 UART communication protocol |
+| `esp32_app/main/main.c` | ESP32-S3 firmware (WiFi AP + WebSocket) |
+| `esp32_app/data/index.html` | Alpine.js + Three.js web tuning UI |
+
+```
 └── WheelRobot.ioc                     # STM32CubeMX configuration
 ```
 
@@ -312,13 +517,30 @@ GND          ───►   GND
 Note: Add 120Ω termination resistor at both ends of CAN bus
 ```
 
-**M0601C Motor (UART):**
+**M0601C Motor (RS485):**
 ```
-M0601C Motor        STM32F407
-─────────────────────────────
-TX           ───►   USART1_RX (PB7)
-RX           ───►   USART1_TX (PA9)
+M0601C Motor        STM32F407 (USART1 + RS485)
+───────────────────────────────────────────
+RS485_A      ───►   TX (PB6)
+RS485_B      ───►   RX (PB7)
+DIR                  PE0 (DE/RE control)
 GND          ───►   GND
+
+Note: USART1 configured as RS485 half-duplex at 115200 baud
+      PE0 = HIGH for transmit, LOW for receive
+```
+
+**ESP32-S3 (Wireless Tuning Module):**
+```
+ESP32-S3            STM32F407 (USART3)
+───────────────────────────────────────────
+TX (GPIO43)  ───►   RX (PB11)
+RX (GPIO44)  ───►   TX (PB10)
+GND          ───►   GND
+
+Note: 921600 baud, 8N1, full-duplex
+      ESP32-S3 acts as WiFi AP: SSID="WheelRobot-Tuning"
+      Web interface: http://192.168.4.1
 ```
 
 ### 2. Software Build

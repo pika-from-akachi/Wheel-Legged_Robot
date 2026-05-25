@@ -318,10 +318,16 @@ void EL05_CAN_RxCallback(CAN_HandleTypeDef *hcan)
     // Extract motor ID from Bit7~0
     uint8_t motor_id = (rx_header.ExtId >> 8) & 0xFF;
 
-    // Find motor handle by can_id
-    extern EL05_MotorHandle_t motor1;
-    EL05_MotorHandle_t *motor = &el05_motor1;
-    if (motor->can_id != motor_id) {
+    // Find motor handle by can_id in the global motor array
+    extern EL05_MotorHandle_t g_el05_motors[4];
+    EL05_MotorHandle_t *motor = NULL;
+    for (int i = 0; i < 4; i++) {
+        if (g_el05_motors[i].can_id == motor_id) {
+            motor = &g_el05_motors[i];
+            break;
+        }
+    }
+    if (motor == NULL) {
         return;
     }
 

@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>轮足机器人无线调参系统</title>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <style>
+        :root {
+            --bg-primary: #0f1117;
+            --bg-secondary: #1a1d27;
+            --bg-card: #232734;
+            --border-color: #2e3348;
+            --text-primary: #e8eaed;
+            --text-secondary: #9aa0b0;
+            --accent-blue: #4fc3f7;
+            --accent-green: #66bb6a;
+            --accent-red: #ef5350;
+            --accent-orange: #ffa726;
+            --accent-purple: #ab47bc;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        /* Layout */
+        .app-container {
+            display: grid;
+            grid-template-columns: 320px 1fr 320px;
+            grid-template-rows: 56px 1fr 32px;
+            height: 100vh;
+            gap: 1px;
+            background: var(--border-color);
+        }
+
+        /* Header */
+        .header {
+            grid-column: 1 / -1;
+            background: var(--bg-secondary);
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            gap: 16px;
+        }
+
+        .header h1 {
+            font-size: 16px;
+            font-weight: 600;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-left: auto;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--accent-red);
+            transition: background 0.3s;
+        }
+
+        .status-dot.online { background: var(--accent-green); box-shadow: 0 0 8px var(--accent-green); }
+        .status-dot.connecting { background: var(--accent-orange); animation: pulse 1s infinite; }
+
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+        /* Panels */
+        .panel {
+            background: var(--bg-secondary);
+            overflow-y: auto;
+            padding: 16px;
+        }
+
+        .panel::-webkit-scrollbar { width: 4px; }
+        .panel::-webkit-scrollbar-track { background: transparent; }
+        .panel::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 2px; }
+
+        .panel-title {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-secondary);
+            margin-bottom: 16px;
+        }
+
+        /* Cards */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 12px;
+        }
+
+        .card-title {
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        /* Parameter controls */
+        .param-group { margin-bottom: 8px; }
+
+        .param-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            margin-bottom: 4px;
+        }
+
+        .param-label span:last-child {
+            color: var(--accent-blue);
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            height: 4px;
+            -webkit-appearance: none;
+            background: var(--border-color);
+            border-radius: 2px;
+            outline: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: var(--accent-blue);
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+
+        input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.2); }
+
+        /* Buttons */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            width: 100%;
+        }
+
+        .btn-primary { background: var(--accent-blue); color: #000; }
+        .btn-primary:hover { opacity: 0.85; }
+        .btn-danger { background: var(--accent-red); color: #fff; }
+        .btn-danger:hover { opacity: 0.85; }
+        .btn-success { background: var(--accent-green); color: #000; }
+        .btn-success:hover { opacity: 0.85; }
+
+        .btn-group { display: flex; gap: 8px; margin-top: 12px; }
+        .btn-group .btn { flex: 1; }
+
+        /* Telemetry */
+        .telemetry-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+        }
+
+        .telemetry-item {
+            background: var(--bg-primary);
+            border-radius: 6px;
+            padding: 8px;
+        }
+
+        .telemetry-item .label {
+            font-size: 10px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .telemetry-item .value {
+            font-size: 16px;
+            font-weight: 600;
+            font-family: 'JetBrains Mono', monospace;
+            margin-top: 2px;
+        }
+
+        .telemetry-item .unit {
+            font-size: 11px;
+            color: var(--text-secondary);
+            font-weight: 400;
+        }
+
+        /* Mode selector */
+        .mode-selector {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+        }
+
+        .mode-btn {
+            padding: 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text-secondary);
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .mode-btn.active {
+            border-color: var(--accent-blue);
+            color: var(--accent-blue);
+            background: rgba(79, 195, 247, 0.1);
+        }
+
+        .mode-btn:hover { border-color: var(--accent-blue); }
+
+        /* 3D Canvas */
+        .viewport {
+            background: var(--bg-primary);
+            position: relative;
+            overflow: hidden;
+        }
+
+        #robot-3d-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        .viewport-overlay {
+            position: absolute;
+            bottom: 12px;
+            left: 12px;
+            font-size: 10px;
+            color: rgba(255,255,255,0.3);
+            pointer-events: none;
+        }
+
+        /* Footer */
+        .footer {
+            grid-column: 1 / -1;
+            background: var(--bg-secondary);
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            gap: 16px;
+        }
+
+        .footer .fps { margin-left: auto; font-family: monospace; }
+
+        /* Responsive */
+        @media (max-width: 1024px) {
+            .app-container {
+                grid-template-columns: 280px 1fr 280px;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .app-container {
+                grid-template-columns: 1fr;
+                grid-template-rows: 56px 300px auto auto 32px;
+            }
+            .panel { max-height: 400px; }
+        }
+
+        /* Tabs for mobile */
+        .tab-bar {
+            display: none;
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        @media (max-width: 768px) {
+            .tab-bar {
+                display: flex;
+            }
+            .tab-bar button {
+                flex: 1;
+                padding: 10px;
+                border: none;
+                background: transparent;
+                color: var(--text-secondary);
+                font-size: 12px;
+                cursor: pointer;
+            }
+            .tab-bar button.active {
+                color: var(--accent-blue);
+                border-bottom: 2px solid var(--accent-blue);
+            }
+        }
+
+        .slider-value {
+            color: var(--accent-blue);
+            font-family: monospace;
+            font-size: 11px;
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container" x-data="tuningApp()" x-init="init()">
+        <!-- Header -->
+        <header class="header">
+            <h1>🦾 轮足机器人 · LQR 调参系统</h1>
+            <div class="connection-status">
+                <span class="status-dot" :class="connectionStatus"></span>
+                <span x-text="statusText"></span>
+                <span>|</span>
+                <span>FW: v1.0.0</span>
+            </div>
+        </header>
+
+        <!-- Left Panel: Parameters -->
+        <div class="panel" id="left-panel">
+            <div class="panel-title">🎛️ LQR 参数调节</div>
+
+            <!-- Enable/Disable -->
+            <div class="card">
+                <div class="btn-group">
+                    <button class="btn btn-success" @click="enableMotors()" :disabled="!wsConnected">⚡ 使能</button>
+                    <button class="btn btn-danger" @click="disableMotors()" :disabled="!wsConnected">⏹ 关闭</button>
+                </div>
+            </div>
+
+            <!-- Control Mode -->
+            <div class="card">
+                <div class="card-title">控制模式</div>
+                <div class="mode-selector">
+                    <template x-for="mode in modes" :key="mode.id">
+                        <button class="mode-btn" :class="{ active: currentMode === mode.id }"
+                                @click="setMode(mode.id)" :disabled="!wsConnected"
+                                x-text="mode.label"></button>
+                    </template>
+                </div>
+            </div>
+
+            <!-- LQR Q Matrix Weights -->
+            <div class="card">
+                <div class="card-title">状态权重 (Q 矩阵)</div>
+                <div class="param-group">
+                    <div class="param-label"><span>机体角度</span><span class="slider-value" x-text="params.Q_body_angle.toFixed(1)"></span></div>
+                    <input type="range" min="1" max="500" x-model="params.Q_body_angle" @input="sendTuning()">
+                </div>
+                <div class="param-group">
+                    <div class="param-label"><span>机体角速度</span><span class="slider-value" x-text="params.Q_body_rate.toFixed(1)"></span></div>
+                    <input type="range" min="0.1" max="100" x-model="params.Q_body_rate" @input="sendTuning()">
+                </div>
+                <div class="param-group">
+                    <div class="param-label"><span>车轮位置</span><span class="slider-value" x-text="params.Q_wheel_position.toFixed(1)"></span></div>
+                    <input type="range" min="0.1" max="50" x-model="params.Q_wheel_position" @input="sendTuning()">
+                </div>
+                <div class="param-group">
+                    <div class="param-label"><span>车轮速度</span><span class="slider-value" x-text="params.Q_wheel_velocity.toFixed(1)"></span></div>
+                    <input type="range" min="0.1" max="50" x-model="params.Q_wheel_velocity" @input="sendTuning()">
+                </div>
+            </div>
+
+            <!-- LQR R Matrix Weights -->
+            <div class="card">
+                <div class="card-title">控制权重 (R 矩阵)</div>
+                <div class="param-group">
+                    <div class="param-label"><span>关节力矩</span><span class="slider-value" x-text="params.R_joint_torque.toFixed(2)"></span></div>
+                    <input type="range" min="0.01" max="5" step="0.01" x-model="params.R_joint_torque" @input="sendTuning()">
+                </div>
+                <div class="param-group">
+                    <div class="param-label"><span>轮毂力矩</span><span class="slider-value" x-text="params.R_wheel_torque.toFixed(2)"></span></div>
+                    <input type="range" min="0.01" max="5" step="0.01" x-model="params.R_wheel_torque" @input="sendTuning()">
+                </div>
+            </div>
+
+            <!-- Saturation Limits -->
+            <div class="card">
+                <div class="card-title">输出限幅</div>
+                <div class="param-group">
+                    <div class="param-label"><span>最大关节力矩</span><span class="slider-value" x-text="params.max_joint_torque.toFixed(1) + ' N.m'"></span></div>
+                    <input type="range" min="1" max="12" step="0.5" x-model="params.max_joint_torque" @input="sendTuning()">
+                </div>
+                <div class="param-group">
+                    <div class="param-label"><span>最大轮毂力矩</span><span class="slider-value" x-text="params.max_wheel_torque.toFixed(1) + ' N.m'"></span></div>
+                    <input type="range" min="0.5" max="8" step="0.5" x-model="params.max_wheel_torque" @input="sendTuning()">
+                </div>
+            </div>
+        </div>
+
+        <!-- Center: 3D Viewport -->
+        <div class="viewport" id="viewport">
+            <div id="robot-3d-canvas"></div>
+            <div class="viewport-overlay">左键旋转 · 滚轮缩放 · 右键平移</div>
+        </div>
+
+        <!-- Right Panel: Telemetry -->
+        <div class="panel" id="right-panel">
+            <div class="panel-title">📊 实时遥测</div>
+
+            <!-- IMU Data -->
+            <div class="card">
+                <div class="card-title">IMU 姿态</div>
+                <div class="telemetry-grid">
+                    <div class="telemetry-item">
+                        <div class="label">横滚角 (Roll)</div>
+                        <div class="value" x-text="telemetry.roll.toFixed(1)"><span class="unit">°</span></div>
+                    </div>
+                    <div class="telemetry-item">
+                        <div class="label">俯仰角 (Pitch)</div>
+                        <div class="value" x-text="telemetry.pitch.toFixed(1)"><span class="unit">°</span></div>
+                    </div>
+                    <div class="telemetry-item">
+                        <div class="label">偏航角 (Yaw)</div>
+                        <div class="value" x-text="telemetry.yaw.toFixed(1)"><span class="unit">°</span></div>
+                    </div>
+                    <div class="telemetry-item">
+                        <div class="label">温度</div>
+                        <div class="value" x-text="telemetry.temp.toFixed(1)"><span class="unit">°C</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Motor Status -->
+            <div class="card">
+                <div class="card-title">电机状态</div>
+                <div class="telemetry-grid">
+                    <template x-for="(motor, i) in telemetry.motors" :key="i">
+                        <div class="telemetry-item">
+                            <div class="label" x-text="'M' + (i+1) + ' · ' + motorType(i)"></div>
+                            <div class="value" x-text="motor.speed.toFixed(0)" style="font-size: 14px;">
+                                <span class="unit">rpm</span>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <!-- Control Output -->
+            <div class="card">
+                <div class="card-title">控制输出</div>
+                <div class="telemetry-grid">
+                    <div class="telemetry-item">
+                        <div class="label">关节力矩</div>
+                        <div class="value" :style="{ color: Math.abs(telemetry.control.jointTorque) > 3 ? 'var(--accent-red)' : 'var(--accent-blue)' }"
+                             x-text="telemetry.control.jointTorque.toFixed(2)"><span class="unit">N·m</span></div>
+                    </div>
+                    <div class="telemetry-item">
+                        <div class="label">轮毂力矩</div>
+                        <div class="value" :style="{ color: Math.abs(telemetry.control.wheelTorque) > 1.5 ? 'var(--accent-red)' : 'var(--accent-green)' }"
+                             x-text="telemetry.control.wheelTorque.toFixed(2)"><span class="unit">N·m</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- System Status -->
+            <div class="card">
+                <div class="card-title">系统状态</div>
+                <div class="telemetry-grid" style="grid-template-columns: 1fr;">
+                    <div class="telemetry-item" style="display: flex; justify-content: space-between;">
+                        <span class="label">控制频率</span>
+                        <span class="value" style="font-size: 13px;" x-text="telemetry.freq.toFixed(0) + ' Hz'"></span>
+                    </div>
+                    <div class="telemetry-item" style="display: flex; justify-content: space-between;">
+                        <span class="label">运行时间</span>
+                        <span class="value" style="font-size: 13px;" x-text="formatUptime(telemetry.uptime)"></span>
+                    </div>
+                    <div class="telemetry-item" style="display: flex; justify-content: space-between;">
+                        <span class="label">数据包</span>
+                        <span class="value" style="font-size: 13px;" x-text="telemetry.packets"></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <span>轮足机器人 LQR 控制系统</span>
+            <span>|</span>
+            <span>CAN: 4×EL05 · RS485: 2×M0601C</span>
+            <span class="fps" x-text="'FPS: ' + fps"></span>
+        </footer>
+    </div>
+
+    <script>
+        function tuningApp() {
+            return {
+                // Connection
+                ws: null,
+                wsConnected: false,
+                connectionStatus: 'offline',
+                statusText: '离线',
+                reconnectTimer: null,
+
+                // 3D
+                scene: null,
+                camera: null,
+                renderer: null,
+                robotGroup: null,
+                controls: null,
+
+                // Performance
+                fps: 0,
+                frameCount: 0,
+                lastFpsTime: 0,
+
+                // Robot mode
+                currentMode: 'standing',
+                modes: [
+                    { id: 'standing', label: '🟢 站立' },
+                    { id: 'driving', label: '🚗 行驶' },
+                    { id: 'sitting', label: '🔽 坐下' },
+                    { id: 'calibration', label: '🔧 校准' },
+                ],
+
+                // LQR Parameters
+                params: {
+                    Q_body_angle: 100,
+                    Q_body_rate: 10,
+                    Q_wheel_position: 1,
+                    Q_wheel_velocity: 1,
+                    R_joint_torque: 0.1,
+                    R_wheel_torque: 0.5,
+                    max_joint_torque: 6,
+                    max_wheel_torque: 3,
+                },
+
+                // Telemetry data
+                telemetry: {
+                    roll: 0, pitch: 0, yaw: 0, temp: 25,
+                    motors: [
+                        { speed: 0, position: 0, torque: 0, online: false },
+                        { speed: 0, position: 0, torque: 0, online: false },
+                        { speed: 0, position: 0, torque: 0, online: false },
+                        { speed: 0, position: 0, torque: 0, online: false },
+                        { speed: 0, position: 0, torque: 0, online: false },
+                        { speed: 0, position: 0, torque: 0, online: false },
+                    ],
+                    control: { jointTorque: 0, wheelTorque: 0 },
+                    freq: 0,
+                    uptime: 0,
+                    packets: 0,
+                },
+
+                motorType(i) {
+                    return i < 4 ? 'EL05(关节)' : 'M0601C(轮毂)';
+                },
+
+                init() {
+                    this.init3D();
+                    this.connectWebSocket();
+                    this.startAnimationLoop();
+                    this.startFpsCounter();
+                },
+
+                init3D() {
+                    // Scene setup
+                    this.scene = new THREE.Scene();
+                    this.scene.background = new THREE.Color(0x0f1117);
+
+                    // Camera
+                    const container = document.getElementById('robot-3d-canvas');
+                    const rect = container.parentElement.getBoundingClientRect();
+                    this.camera = new THREE.PerspectiveCamera(45, rect.width / rect.height, 0.1, 100);
+                    this.camera.position.set(2, 1.5, 2.5);
+                    this.camera.lookAt(0, 0.5, 0);
+
+                    // Renderer
+                    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+                    this.renderer.setSize(rect.width, rect.height);
+                    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+                    this.renderer.shadowMap.enabled = true;
+                    container.appendChild(this.renderer.domElement);
+
+                    // Controls
+                    this.controls = new THREE.OrbitControls(this.camera, this.renderer.domElement);
+                    this.controls.target.set(0, 0.5, 0);
+                    this.controls.enableDamping = true;
+                    this.controls.dampingFactor = 0.1;
+                    this.controls.update();
+
+                    // Lighting
+                    const ambientLight = new THREE.AmbientLight(0x404060, 0.5);
+                    this.scene.add(ambientLight);
+
+                    const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+                    dirLight.position.set(3, 5, 4);
+                    dirLight.castShadow = true;
+                    this.scene.add(dirLight);
+
+                    const fillLight = new THREE.DirectionalLight(0x4fc3f7, 0.3);
+                    fillLight.position.set(-2, 1, -2);
+                    this.scene.add(fillLight);
+
+                    // Grid
+                    const gridHelper = new THREE.GridHelper(3, 20, 0x2e3348, 0x1a1d27);
+                    gridHelper.position.y = 0;
+                    this.scene.add(gridHelper);
+
+                    // Build placeholder robot model
+                    this.buildRobotModel();
+
+                    // Window resize
+                    window.addEventListener('resize', () => {
+                        const r = container.parentElement.getBoundingClientRect();
+                        this.camera.aspect = r.width / r.height;
+                        this.camera.updateProjectionMatrix();
+                        this.renderer.setSize(r.width, r.height);
+                    });
+                },
+
+                buildRobotModel() {
+                    this.robotGroup = new THREE.Group();
+
+                    const bodyGeo = new THREE.BoxGeometry(0.30, 0.08, 0.12);
+                    const bodyMat = new THREE.MeshStandardMaterial({
+                        color: 0x4fc3f7,
+                        metalness: 0.6,
+                        roughness: 0.3,
+                    });
+                    const body = new THREE.Mesh(bodyGeo, bodyMat);
+                    body.position.y = 0.45;
+                    body.castShadow = true;
+                    this.robotGroup.add(body);
+
+                    // Upper leg (placeholder)
+                    const legMat = new THREE.MeshStandardMaterial({
+                        color: 0x66bb6a,
+                        metalness: 0.3,
+                        roughness: 0.6,
+                    });
+
+                    // 4 legs
+                    const legPositions = [
+                        { x: -0.10, z: -0.05 }, // Left front
+                        { x: -0.10, z: 0.05 },  // Left back
+                        { x: 0.10, z: -0.05 },  // Right front
+                        { x: 0.10, z: 0.05 },   // Right back
+                    ];
+
+                    legPositions.forEach(pos => {
+                        const upperLeg = new THREE.Mesh(
+                            new THREE.CylinderGeometry(0.012, 0.015, 0.12, 8),
+                            legMat
+                        );
+                        upperLeg.position.set(pos.x, 0.35, pos.z);
+                        upperLeg.castShadow = true;
+                        this.robotGroup.add(upperLeg);
+
+                        const lowerLeg = new THREE.Mesh(
+                            new THREE.CylinderGeometry(0.010, 0.012, 0.12, 8),
+                            legMat
+                        );
+                        lowerLeg.position.set(pos.x, 0.22, pos.z);
+                        lowerLeg.castShadow = true;
+                        this.robotGroup.add(lowerLeg);
+
+                        // Joint sphere
+                        const joint = new THREE.Mesh(
+                            new THREE.SphereGeometry(0.018, 8, 8),
+                            new THREE.MeshStandardMaterial({ color: 0x2e3348, metalness: 0.5 })
+                        );
+                        joint.position.set(pos.x, 0.29, pos.z);
+                        this.robotGroup.add(joint);
+                    });
+
+                    // Wheels
+                    const wheelMat = new THREE.MeshStandardMaterial({
+                        color: 0x333333,
+                        metalness: 0.2,
+                        roughness: 0.8,
+                    });
+
+                    const wheelPositions = [
+                        { x: -0.14, z: 0 },
+                        { x: 0.14, z: 0 },
+                    ];
+
+                    wheelPositions.forEach(pos => {
+                        const wheel = new THREE.Mesh(
+                            new THREE.CylinderGeometry(0.04, 0.04, 0.025, 16),
+                            wheelMat
+                        );
+                        wheel.rotation.x = Math.PI / 2;
+                        wheel.position.set(pos.x, 0.04, pos.z);
+                        wheel.castShadow = true;
+                        this.robotGroup.add(wheel);
+                    });
+
+                    this.scene.add(this.robotGroup);
+                },
+
+                // --- WebSocket ---
+                connectWebSocket() {
+                    this.connectionStatus = 'connecting';
+                    this.statusText = '连接中...';
+
+                    const wsUrl = `ws://${window.location.hostname}/ws`;
+                    console.log('Connecting to:', wsUrl);
+
+                    try {
+                        this.ws = new WebSocket(wsUrl);
+                    } catch (e) {
+                        console.error('WebSocket error:', e);
+                        this.scheduleReconnect();
+                        return;
+                    }
+
+                    this.ws.onopen = () => {
+                        this.wsConnected = true;
+                        this.connectionStatus = 'online';
+                        this.statusText = '已连接';
+                        console.log('WebSocket connected');
+                    };
+
+                    this.ws.onclose = () => {
+                        this.wsConnected = false;
+                        this.connectionStatus = 'offline';
+                        this.statusText = '离线';
+                        console.log('WebSocket disconnected');
+                        this.scheduleReconnect();
+                    };
+
+                    this.ws.onerror = (err) => {
+                        console.error('WebSocket error:', err);
+                    };
+
+                    this.ws.onmessage = (event) => {
+                        this.handleRobotData(event.data);
+                    };
+                },
+
+                scheduleReconnect() {
+                    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+                    this.reconnectTimer = setTimeout(() => this.connectWebSocket(), 3000);
+                },
+
+                handleRobotData(data) {
+                    // Update telemetry counters
+                    this.telemetry.packets++;
+
+                    // Try to parse as binary (protocol buffer) or JSON
+                    try {
+                        const json = JSON.parse(data);
+                        if (json.type === 'state') {
+                            Object.assign(this.telemetry, json.data);
+                        }
+                        return;
+                    } catch (e) {
+                        // Not JSON, try binary parsing
+                    }
+
+                    // Binary format from STM32 (simulated for now)
+                    if (data instanceof ArrayBuffer || data instanceof Blob) {
+                        this.parseBinaryData(data);
+                    }
+                },
+
+                parseBinaryData(data) {
+                    // TODO: Parse STM32 binary protocol packet
+                    // For now, simulation mode
+                },
+
+                // --- Commands ---
+                sendToSTM32(cmd) {
+                    if (this.ws && this.wsConnected) {
+                        this.ws.send(JSON.stringify(cmd));
+                    }
+                },
+
+                enableMotors() {
+                    this.sendToSTM32({ type: 'command', cmd: 'enable' });
+                },
+
+                disableMotors() {
+                    this.sendToSTM32({ type: 'command', cmd: 'disable' });
+                },
+
+                setMode(modeId) {
+                    this.currentMode = modeId;
+                    this.sendToSTM32({ type: 'command', cmd: 'set_mode', mode: modeId });
+                },
+
+                sendTuning() {
+                    if (!this.wsConnected) return;
+                    // Debounce - send after 50ms idle
+                    if (this.tuningTimer) clearTimeout(this.tuningTimer);
+                    this.tuningTimer = setTimeout(() => {
+                        this.sendToSTM32({
+                            type: 'tuning',
+                            params: { ...this.params }
+                        });
+                    }, 50);
+                },
+
+                // --- 3D Animation ---
+                startAnimationLoop() {
+                    const animate = () => {
+                        requestAnimationFrame(animate);
+                        this.controls.update();
+
+                        // Animate robot model based on telemetry
+                        if (this.robotGroup) {
+                            const pitch = this.telemetry.pitch * Math.PI / 180;
+                            this.robotGroup.rotation.x = pitch * 0.5;
+
+                            // Animate legs based on motor positions
+                            for (let i = 0; i < 4 && i < this.telemetry.motors.length; i++) {
+                                const motorData = this.telemetry.motors[i];
+                                if (motorData.position) {
+                                    // Update leg positions when we have real data
+                                }
+                            }
+                        }
+
+                        this.renderer.render(this.scene, this.camera);
+                        this.frameCount++;
+                    };
+                    animate();
+                },
+
+                startFpsCounter() {
+                    this.lastFpsTime = performance.now();
+                    setInterval(() => {
+                        const now = performance.now();
+                        const elapsed = (now - this.lastFpsTime) / 1000;
+                        this.fps = Math.round(this.frameCount / elapsed);
+                        this.frameCount = 0;
+                        this.lastFpsTime = now;
+                    }, 1000);
+                },
+
+                formatUptime(seconds) {
+                    const h = Math.floor(seconds / 3600);
+                    const m = Math.floor((seconds % 3600) / 60);
+                    const s = Math.floor(seconds % 60);
+                    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+                },
+            };
+        }
+    </script>
+</body>
+</html>
