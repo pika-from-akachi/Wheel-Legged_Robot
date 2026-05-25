@@ -59,6 +59,7 @@ extern "C" {
 #define PKT_TYPE_HEARTBEAT          0x06    /**< Heartbeat / connection check */
 #define PKT_TYPE_SET_SPEED          0x07    /**< Set target speed */
 #define PKT_TYPE_SET_POSITION       0x08    /**< Set target joint positions */
+#define PKT_TYPE_M0601C_CMD        0x09    /**< M0601C-specific command (accTime/brake) */
 #define PKT_TYPE_SYS_RESET          0x20    /**< System reset command */
 #define PKT_TYPE_FW_VERSION         0x30    /**< Request firmware version */
 

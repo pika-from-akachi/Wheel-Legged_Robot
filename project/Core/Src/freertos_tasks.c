@@ -19,6 +19,16 @@
 #include <math.h>
 
 /* ============================================================================
+ *                          MOTOR ID MAPPING
+ * ============================================================================
+ *  EL05 joint motors: IDs 1-4 (CAN)
+ *  M0601C hub motors: IDs 5-6 (RS485, mapped from RS485 IDs 1-2)
+ * ============================================================================ */
+
+#define M0601C_QUEUE_ID_OFFSET   4        /* M0601C starts at queue ID 5 */
+#define M0601C_WHEEL_TORQUE_TO_CURRENT  4.096f / 0.15f  /* Raw = Nm / Kt * (32767/8000), Kt≈0.15 */
+
+/* ============================================================================
  *                          EXTERNAL VARIABLES
  * ============================================================================ */
 
@@ -256,6 +266,25 @@ void Task_Balance(void *argument)
                 motorCmd.motor_id = ROBOT_EL05_ID_KNEE_R;
                 motorCmd.torque = joint_torque * 0.5f;
                 osMessageQueuePut(queue_MotorCmd, &motorCmd, 0, 0);
+
+                /* ===== M0601C Wheel Motors: convert LQR wheel torque to current command ===== */
+                int16_t wheel_current_raw = (int16_t)(wheel_torque * M0601C_WHEEL_TORQUE_TO_CURRENT);
+                /* Clamp to valid range */
+                if (wheel_current_raw > 32767) wheel_current_raw = 32767;
+                if (wheel_current_raw < -32767) wheel_current_raw = -32767;
+
+                motorCmd.motor_id = M0601C_QUEUE_ID_OFFSET + ROBOT_M0601C_ID_WHEEL_L;
+                motorCmd.torque = wheel_torque * 0.5f;
+                motorCmd.position = (float)wheel_current_raw;
+                motorCmd.velocity = 0.0f;
+                motorCmd.mode = M0601C_MODE_CURRENT;
+                motorCmd.timestamp = osKernelGetTickCount();
+                osMessageQueuePut(queue_MotorCmd, &motorCmd, 0, 0);
+
+                motorCmd.motor_id = M0601C_QUEUE_ID_OFFSET + ROBOT_M0601C_ID_WHEEL_R;
+                motorCmd.torque = wheel_torque * 0.5f;
+                motorCmd.position = (float)wheel_current_raw;
+                osMessageQueuePut(queue_MotorCmd, &motorCmd, 0, 0);
             }
         }
 
@@ -348,12 +377,24 @@ void Task_Motor(void *argument)
             g_motor_update_count++;
         }
 
-        /* Poll M0601C feedback (every cycle) */
+        /* Process M0601C commands (non-blocking peek into queue) */
         osMutexAcquire(mutex_RS485, osWaitForever);
+        while (osMessageQueueGet(queue_MotorCmd, &motorCmd, NULL, 0) == osOK) {
+            if (motorCmd.motor_id >= (M0601C_QUEUE_ID_OFFSET + 1) &&
+                motorCmd.motor_id <= (M0601C_QUEUE_ID_OFFSET + 2)) {
+                uint8_t m0601c_idx = motorCmd.motor_id - M0601C_QUEUE_ID_OFFSET - 1;
+                int16_t current_raw = (int16_t)motorCmd.position;
+                M0601C_CurrentControl(&g_m0601c_motors[m0601c_idx], current_raw);
+            }
+        }
+
+        /* Poll M0601C feedback (every cycle) */
         for (int i = 0; i < 2; i++) {
             M0601C_RequestFeedback(&g_m0601c_motors[i]);
-            HAL_Delay(1);  /* Small delay between requests */
+            for (volatile uint32_t d = 0; d < 500; d++) {} /* ~50ns delay */
         }
+        /* Process any received RS485 frames */
+        M0601C_ProcessRxFrame(g_m0601c_motors, 2);
         osMutexRelease(mutex_RS485);
 
         /* Delay until next cycle (200Hz) */

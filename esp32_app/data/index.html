@@ -406,6 +406,24 @@
                     <input type="range" min="0.5" max="8" step="0.5" x-model="params.max_wheel_torque" @input="sendTuning()">
                 </div>
             </div>
+
+            <!-- M0601C Hub Motor Controls -->
+            <div class="card">
+                <div class="card-title">M0601C 轮毂电机</div>
+                <div class="param-group">
+                    <div class="param-label"><span>加速时间 (accTime)</span><span class="slider-value" x-text="params.m0601c_acc_time.toFixed(0)"></span></div>
+                    <input type="range" min="0" max="100" step="1" x-model="params.m0601c_acc_time" @input="sendM0601CTuning()">
+                </div>
+                <div class="param-group">
+                    <div class="param-label"><span>刹车使能</span><span class="slider-value" x-text="params.m0601c_brake ? 'ON' : 'OFF'"></span></div>
+                    <input type="range" min="0" max="1" step="1" x-model="params.m0601c_brake" @input="sendM0601CTuning()">
+                </div>
+                <div class="btn-group" style="margin-top: 8px;">
+                    <button class="btn btn-primary" @click="testM0601C(100)" :disabled="!wsConnected">正转</button>
+                    <button class="btn btn-danger" @click="testM0601C(-100)" :disabled="!wsConnected">反转</button>
+                    <button class="btn" style="background: var(--border-color); color: var(--text-primary);" @click="testM0601C(0)" :disabled="!wsConnected">停止</button>
+                </div>
+            </div>
         </div>
 
         <!-- Center: 3D Viewport -->
@@ -446,11 +464,21 @@
                 <div class="card-title">电机状态</div>
                 <div class="telemetry-grid">
                     <template x-for="(motor, i) in telemetry.motors" :key="i">
-                        <div class="telemetry-item">
-                            <div class="label" x-text="'M' + (i+1) + ' · ' + motorType(i)"></div>
+                        <div class="telemetry-item" :style="motor.online ? '' : 'opacity: 0.5;'">
+                            <div class="label">
+                                <span x-text="'M' + (i+1) + ' · ' + motorType(i)"></span>
+                                <span :style="{ color: motor.online ? 'var(--accent-green)' : 'var(--accent-red)', fontSize: '10px' }"
+                                      x-text="motor.online ? '●' : '○'"></span>
+                            </div>
                             <div class="value" x-text="motor.speed.toFixed(0)" style="font-size: 14px;">
                                 <span class="unit">rpm</span>
                             </div>
+                            <template x-if="i >= 4">
+                                <div style="font-size: 10px; color: var(--text-secondary); margin-top: 2px;">
+                                    <span x-text="motor.current.toFixed(1) + ' A'"></span>
+                                    <span x-text="' · ' + motor.temp.toFixed(0) + '°C'" style="margin-left: 4px;"></span>
+                                </div>
+                            </template>
                         </div>
                     </template>
                 </div>
@@ -543,18 +571,20 @@
                     R_wheel_torque: 0.5,
                     max_joint_torque: 6,
                     max_wheel_torque: 3,
+                    m0601c_acc_time: 10,
+                    m0601c_brake: 0,
                 },
 
                 // Telemetry data
                 telemetry: {
                     roll: 0, pitch: 0, yaw: 0, temp: 25,
                     motors: [
-                        { speed: 0, position: 0, torque: 0, online: false },
-                        { speed: 0, position: 0, torque: 0, online: false },
-                        { speed: 0, position: 0, torque: 0, online: false },
-                        { speed: 0, position: 0, torque: 0, online: false },
-                        { speed: 0, position: 0, torque: 0, online: false },
-                        { speed: 0, position: 0, torque: 0, online: false },
+                        { speed: 0, position: 0, torque: 0, current: 0, temp: 25, online: false },
+                        { speed: 0, position: 0, torque: 0, current: 0, temp: 25, online: false },
+                        { speed: 0, position: 0, torque: 0, current: 0, temp: 25, online: false },
+                        { speed: 0, position: 0, torque: 0, current: 0, temp: 25, online: false },
+                        { speed: 0, position: 0, torque: 0, current: 0, temp: 25, online: false },
+                        { speed: 0, position: 0, torque: 0, current: 0, temp: 25, online: false },
                     ],
                     control: { jointTorque: 0, wheelTorque: 0 },
                     freq: 0,
@@ -759,7 +789,7 @@
                     // Update telemetry counters
                     this.telemetry.packets++;
 
-                    // Try to parse as binary (protocol buffer) or JSON
+                    // Try to parse as JSON (echoed commands or JSON-formatted state)
                     try {
                         const json = JSON.parse(data);
                         if (json.type === 'state') {
@@ -770,15 +800,86 @@
                         // Not JSON, try binary parsing
                     }
 
-                    // Binary format from STM32 (simulated for now)
-                    if (data instanceof ArrayBuffer || data instanceof Blob) {
+                    // Binary format: STM32 protocol packet or raw data
+                    if (data instanceof ArrayBuffer) {
                         this.parseBinaryData(data);
+                    } else if (data instanceof Blob) {
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            this.parseBinaryData(e.target.result);
+                        };
+                        reader.readAsArrayBuffer(data);
                     }
                 },
 
-                parseBinaryData(data) {
-                    // TODO: Parse STM32 binary protocol packet
-                    // For now, simulation mode
+                /**
+                 * Parse STM32 binary packet
+                 * Protocol: [0xAA][0xBB][type][len][payload...][crc16_H][crc16_L]
+                 * State data (type=0x82) payload format:
+                 *   [0..23]  IMU: 6×float32 LE (accel x/y/z, gyro x/y/z)
+                 *   [24..35] M0601C: 2×(int16 speed, int16 current, uint8 temp, uint8 online)
+                 *   [36..43] LQR: 2×float32 LE (joint_torque, wheel_torque)
+                 *   [44]     Robot mode: uint8
+                 */
+                parseBinaryData(buffer) {
+                    const view = new DataView(buffer);
+                    let offset = 0;
+
+                    while (offset + 4 < buffer.byteLength) {
+                        // Find STM32 packet start
+                        if (view.getUint8(offset) !== 0xAA || view.getUint8(offset + 1) !== 0xBB) {
+                            offset++;
+                            continue;
+                        }
+
+                        const pktType = view.getUint8(offset + 2);
+                        const pktLen = view.getUint8(offset + 3);
+
+                        // Validate packet bounds
+                        if (offset + 4 + pktLen + 2 > buffer.byteLength) break;
+
+                        if (pktType === 0x82) { // PKT_TYPE_STATE_DATA
+                            this.parseStatePayload(view, offset + 4, pktLen);
+                        }
+
+                        offset += 4 + pktLen + 2; // Skip to next potential packet
+                    }
+                },
+
+                parseStatePayload(view, offset, len) {
+                    if (len < 45) return; // Need at least 45 bytes for full state
+
+                    // --- IMU data (6 floats, offset+0 to offset+23) ---
+                    const imu = {
+                        ax: view.getFloat32(offset, true),
+                        ay: view.getFloat32(offset + 4, true),
+                        az: view.getFloat32(offset + 8, true),
+                        gx: view.getFloat32(offset + 12, true),
+                        gy: view.getFloat32(offset + 16, true),
+                        gz: view.getFloat32(offset + 20, true),
+                    };
+
+                    // Estimate roll/pitch from accelerometer
+                    this.telemetry.roll = Math.atan2(imu.ay, imu.az) * 180 / Math.PI;
+                    this.telemetry.pitch = Math.atan2(-imu.ax, Math.sqrt(imu.ay * imu.ay + imu.az * imu.az)) * 180 / Math.PI;
+
+                    // --- M0601C data (offset+24 to offset+35) ---
+                    for (let i = 0; i < 2; i++) {
+                        const mi = 4 + i; // motors[4], motors[5]
+                        const mOffset = offset + 24 + i * 6;
+                        this.telemetry.motors[mi].speed = view.getInt16(mOffset, true);
+                        this.telemetry.motors[mi].current = view.getInt16(mOffset + 2, true) / 1000.0; // mA to A
+                        this.telemetry.motors[mi].temp = view.getUint8(mOffset + 4);
+                        this.telemetry.motors[mi].online = view.getUint8(mOffset + 5) !== 0;
+                    }
+
+                    // --- LQR control output (2 floats, offset+36 to offset+43) ---
+                    this.telemetry.control.jointTorque = view.getFloat32(offset + 36, true);
+                    this.telemetry.control.wheelTorque = view.getFloat32(offset + 40, true);
+
+                    // --- Robot mode (offset+44) ---
+                    const mode = view.getUint8(offset + 44);
+                    this.currentMode = ['standing', 'driving', 'sitting', 'jumping', 'emergency', 'calibration'][mode] || 'standing';
                 },
 
                 // --- Commands ---
@@ -811,6 +912,35 @@
                             params: { ...this.params }
                         });
                     }, 50);
+                },
+
+                sendM0601CTuning() {
+                    if (!this.wsConnected) return;
+                    // Send M0601C accTime/brake params to both wheels
+                    for (let wheel = 0; wheel < 2; wheel++) {
+                        this.sendToSTM32({
+                            type: 'm0601c_cmd',
+                            motor_idx: wheel,
+                            cmd_type: 0, // accTime
+                            value: this.params.m0601c_acc_time
+                        });
+                    }
+                    this.sendToSTM32({
+                        type: 'm0601c_cmd',
+                        motor_idx: 0,
+                        cmd_type: 1, // brake
+                        value: this.params.m0601c_brake
+                    });
+                },
+
+                testM0601C(speed) {
+                    if (!this.wsConnected) return;
+                    this.sendToSTM32({
+                        type: 'command',
+                        cmd: 'm0601c_speed',
+                        speed: speed,
+                        motor: 'both'
+                    });
                 },
 
                 // --- 3D Animation ---
