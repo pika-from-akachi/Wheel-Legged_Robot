@@ -188,7 +188,7 @@ int main(void)
 
   for (int i = 0; i < 2; i++) {
       g_m0601c_motors[i].id = i + 1;
-      g_m0601c_motors[i].mode = M0601C_MODE_IDLE;
+      g_m0601c_motors[i].mode = M0601C_MODE_SPEED;
       g_m0601c_motors[i].state = M0601C_STATE_DISABLED;
       g_m0601c_motors[i].is_online = false;
   }

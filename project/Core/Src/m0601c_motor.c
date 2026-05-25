@@ -2,8 +2,8 @@
   ******************************************************************************
   * @file    m0601c_motor.c
   * @brief   M0601C Hub Motor Driver (RS485)
-  * @note    RS485 half-duplex communication via USART1
-  *          Protocol: 10-byte frames with CRC-8/MAXIM
+  * @note    帧协议对齐已验证的 motor_driver 规范：
+  *          驱动指令 0x64 | 反馈请求 0x74 | 模式切换 0xA0
   ******************************************************************************
   */
 
@@ -16,14 +16,13 @@ static UART_HandleTypeDef *g_huart = NULL;
 static GPIO_TypeDef *g_dir_port = NULL;
 static uint16_t g_dir_pin = 0;
 
-/* RS485 receive buffer (interrupt-driven byte collection) */
-static volatile uint8_t g_rx_byte = 0;
-static volatile uint8_t g_rx_buf[10];
-static volatile uint8_t g_rx_idx = 0;
-static volatile bool g_rx_complete = false;
+/* RS485 接收缓冲（中断逐字节收集） */
+static volatile uint8_t  g_rx_buf[M0601C_FRAME_LEN];
+static volatile uint8_t  g_rx_idx = 0;
+static volatile bool     g_rx_complete = false;
 
-/* CRC-8/MAXIM lookup table */
-static const uint8_t crc8_table[256] = {
+/* CRC-8/MAXIM 查找表（多项式 0x31，初始 0x00，RefIn/RefOut=true） */
+static const uint8_t s_crc8_table[256] = {
     0x00, 0x5E, 0xBC, 0xE2, 0x61, 0x3F, 0xDD, 0x83,
     0xC2, 0x9C, 0x7E, 0x20, 0xA3, 0xFD, 0x1F, 0x41,
     0x9D, 0xC3, 0x21, 0x7F, 0xFC, 0xA2, 0x40, 0x1E,
@@ -58,257 +57,195 @@ static const uint8_t crc8_table[256] = {
     0xB6, 0xE8, 0x0A, 0x54, 0xD7, 0x89, 0x6B, 0x35,
 };
 
-/* Private function prototypes ----------------------------------------------*/
+/* ============================================================================
+ *                          Private helpers
+ * ============================================================================ */
 
-static uint8_t M0601C_CRC8(uint8_t *data, uint16_t len);
-static void M0601C_SetDirTX(void);
-static void M0601C_SetDirRX(void);
-
-/* Private functions ---------------------------------------------------------*/
-
-/**
- * @brief Compute CRC-8/MAXIM (Dallas 1-Wire)
- * @param data Pointer to data buffer
- * @param len  Data length
- * @return CRC-8 value
- */
-static uint8_t M0601C_CRC8(uint8_t *data, uint16_t len)
+static uint8_t M0601C_CRC8(const uint8_t *data, uint8_t len)
 {
     uint8_t crc = 0x00;
-    for (uint16_t i = 0; i < len; i++) {
-        crc = crc8_table[crc ^ data[i]];
+    for (uint8_t i = 0; i < len; i++) {
+        crc = s_crc8_table[crc ^ data[i]];
     }
     return crc;
 }
 
-/**
- * @brief Set RS485 transceiver to transmit mode
- */
 static void M0601C_SetDirTX(void)
 {
     HAL_GPIO_WritePin(g_dir_port, g_dir_pin, GPIO_PIN_SET);
 }
 
-/**
- * @brief Set RS485 transceiver to receive mode
- */
 static void M0601C_SetDirRX(void)
 {
     HAL_GPIO_WritePin(g_dir_port, g_dir_pin, GPIO_PIN_RESET);
 }
 
-/* Exported functions --------------------------------------------------------*/
+/**
+  * @brief 发送一帧（10字节），自动切换 RS485 方向
+  */
+static HAL_StatusTypeDef M0601C_TransmitFrame(uint8_t *frame)
+{
+    HAL_StatusTypeDef status;
+
+    M0601C_SetDirTX();
+    /* 短延时确保方向切换完成 */
+    for (volatile uint32_t i = 0; i < 20; i++) {}
+    status = HAL_UART_Transmit(g_huart, frame, M0601C_FRAME_LEN, M0601C_TX_TIMEOUT);
+    /* 等待发送完成再切回 RX */
+    while (HAL_UART_GetState(g_huart) & HAL_UART_STATE_BUSY_TX) {}
+    M0601C_SetDirRX();
+
+    return status;
+}
+
+/* ============================================================================
+ *                          帧组装（对齐原协议）
+ * ============================================================================ */
 
 /**
- * @brief Initialize M0601C motor driver
- * @param huart    UART handle (USART1)
- * @param dir_port RS485 direction GPIO port
- * @param dir_pin  RS485 direction GPIO pin
- */
+  * @brief 组装驱动指令帧 (0x64)
+  *         [ID] 0x64 [val_H] [val_L] 0 0 [accTime] [brake] 0 [CRC8]
+  */
+static void M0601C_BuildDriveFrame(uint8_t *frame, uint8_t motor_id,
+                                    int16_t value, uint8_t acc_time, uint8_t brake)
+{
+    memset(frame, 0, M0601C_FRAME_LEN);
+    frame[0] = motor_id;
+    frame[1] = M0601C_CMD_DRIVE;
+    frame[2] = (uint8_t)(value >> 8);
+    frame[3] = (uint8_t)(value & 0xFF);
+    frame[6] = acc_time;
+    frame[7] = brake;
+    frame[9] = M0601C_CRC8(frame, 9);
+}
+
+/**
+  * @brief 组装反馈请求帧 (0x74)
+  *         [ID] 0x74 [8字节0] [CRC8]
+  */
+static void M0601C_BuildFeedbackFrame(uint8_t *frame, uint8_t motor_id)
+{
+    memset(frame, 0, M0601C_FRAME_LEN);
+    frame[0] = motor_id;
+    frame[1] = M0601C_CMD_FEEDBACK;
+    frame[9] = M0601C_CRC8(frame, 9);
+}
+
+/**
+  * @brief 组装模式切换帧 (0xA0)
+  *         [ID] 0xA0 [8字节0] [mode]
+  * @note  原规范模式切换指令无 CRC，DATA[9] 直接放模式值
+  */
+static void M0601C_BuildModeFrame(uint8_t *frame, uint8_t motor_id, uint8_t mode)
+{
+    memset(frame, 0, M0601C_FRAME_LEN);
+    frame[0] = motor_id;
+    frame[1] = M0601C_CMD_MODE_SWITCH;
+    frame[9] = mode;
+}
+
+/* ============================================================================
+ *                          Public API
+ * ============================================================================ */
+
 void M0601C_Init(UART_HandleTypeDef *huart, GPIO_TypeDef *dir_port, uint16_t dir_pin)
 {
     g_huart = huart;
     g_dir_port = dir_port;
     g_dir_pin = dir_pin;
 
-    /* Default to receive mode */
     M0601C_SetDirRX();
-
-    /* Clear RX buffer */
     g_rx_idx = 0;
     g_rx_complete = false;
     memset((void *)g_rx_buf, 0, sizeof(g_rx_buf));
 }
 
-/**
- * @brief Switch RS485 to receive mode
- */
-void M0601C_RS485_EnterRx(void)
+void M0601C_RS485_EnterRx(void) { M0601C_SetDirRX(); }
+void M0601C_RS485_EnterTx(void) { M0601C_SetDirTX(); }
+
+HAL_StatusTypeDef M0601C_SpeedControl(M0601C_MotorHandle_t *motor, int16_t speed_rpm)
 {
-    M0601C_SetDirRX();
+    uint8_t frame[M0601C_FRAME_LEN];
+    M0601C_BuildDriveFrame(frame, motor->id, speed_rpm,
+                            M0601C_ACC_DEFAULT, M0601C_BRAKE_DISABLE);
+    return M0601C_TransmitFrame(frame);
 }
 
-/**
- * @brief Switch RS485 to transmit mode
- */
-void M0601C_RS485_EnterTx(void)
+HAL_StatusTypeDef M0601C_CurrentControl(M0601C_MotorHandle_t *motor, int16_t current_raw)
 {
-    M0601C_SetDirTX();
+    uint8_t frame[M0601C_FRAME_LEN];
+    M0601C_BuildDriveFrame(frame, motor->id, current_raw,
+                            M0601C_ACC_DEFAULT, M0601C_BRAKE_DISABLE);
+    return M0601C_TransmitFrame(frame);
 }
 
-/**
- * @brief Transmit data over RS485
- * @param data Data buffer
- * @param len  Data length
- * @return HAL status
- */
-HAL_StatusTypeDef M0601C_RS485_Transmit(uint8_t *data, uint16_t len)
+HAL_StatusTypeDef M0601C_Brake(M0601C_MotorHandle_t *motor)
 {
+    uint8_t frame[M0601C_FRAME_LEN];
+    M0601C_BuildDriveFrame(frame, motor->id, 0,
+                            M0601C_ACC_DEFAULT, M0601C_BRAKE_ENABLE);
+    return M0601C_TransmitFrame(frame);
+}
+
+HAL_StatusTypeDef M0601C_Idle(M0601C_MotorHandle_t *motor)
+{
+    uint8_t frame[M0601C_FRAME_LEN];
+    M0601C_BuildDriveFrame(frame, motor->id, 0,
+                            M0601C_ACC_DEFAULT, M0601C_BRAKE_DISABLE);
+    return M0601C_TransmitFrame(frame);
+}
+
+HAL_StatusTypeDef M0601C_RequestFeedback(M0601C_MotorHandle_t *motor)
+{
+    uint8_t frame[M0601C_FRAME_LEN];
+
+    /* 清空接收缓冲，准备接收电机响应 */
+    g_rx_idx = 0;
+    g_rx_complete = false;
+
+    M0601C_BuildFeedbackFrame(frame, motor->id);
+    return M0601C_TransmitFrame(frame);
+}
+
+HAL_StatusTypeDef M0601C_SetMode(M0601C_MotorHandle_t *motor, uint8_t mode)
+{
+    uint8_t frame[M0601C_FRAME_LEN];
     HAL_StatusTypeDef status;
 
+    M0601C_BuildModeFrame(frame, motor->id, mode);
     M0601C_SetDirTX();
-    status = HAL_UART_Transmit(g_huart, data, len, M0601C_TX_TIMEOUT);
+    for (volatile uint32_t i = 0; i < 20; i++) {}
+    status = HAL_UART_Transmit(g_huart, frame, M0601C_FRAME_LEN, M0601C_TX_TIMEOUT);
+    while (HAL_UART_GetState(g_huart) & HAL_UART_STATE_BUSY_TX) {}
     M0601C_SetDirRX();
 
+    if (status == HAL_OK) {
+        motor->mode = mode;
+    }
     return status;
 }
 
-/**
- * @brief Enable motor
- * @param motor Motor handle
- */
 HAL_StatusTypeDef M0601C_Enable(M0601C_MotorHandle_t *motor)
 {
-    /* Command format: AA 55 o <id> 00 00 00 00 00 CRC */
-    uint8_t cmd[10];
-    cmd[0] = M0601C_FRAME_HEADER;
-    cmd[1] = M0601C_FRAME_HEADER2;
-    cmd[2] = M0601C_CMD_ENABLE;
-    cmd[3] = motor->id;
-    memset(&cmd[4], 0, 5);
-    cmd[9] = M0601C_CRC8(cmd, 9);
-
+    M0601C_SetMode(motor, M0601C_MODE_SPEED);
+    HAL_Delay(2);
+    M0601C_Idle(motor);
     motor->state = M0601C_STATE_ENABLED;
-    return M0601C_RS485_Transmit(cmd, 10);
+    return HAL_OK;
 }
 
-/**
- * @brief Disable motor
- * @param motor Motor handle
- */
 HAL_StatusTypeDef M0601C_Disable(M0601C_MotorHandle_t *motor)
 {
-    uint8_t cmd[10];
-    cmd[0] = M0601C_FRAME_HEADER;
-    cmd[1] = M0601C_FRAME_HEADER2;
-    cmd[2] = M0601C_CMD_DISABLE;
-    cmd[3] = motor->id;
-    memset(&cmd[4], 0, 5);
-    cmd[9] = M0601C_CRC8(cmd, 9);
-
+    M0601C_Idle(motor);
     motor->state = M0601C_STATE_DISABLED;
-    return M0601C_RS485_Transmit(cmd, 10);
+    return HAL_OK;
 }
 
-/**
- * @brief Speed control command
- * @param motor     Motor handle
- * @param speed_rpm Target speed in RPM (-32768 to 32767)
- */
-HAL_StatusTypeDef M0601C_SpeedControl(M0601C_MotorHandle_t *motor, int16_t speed_rpm)
+M0601C_Feedback_t* M0601C_GetFeedback(M0601C_MotorHandle_t *motor)
 {
-    uint8_t cmd[10];
-    cmd[0] = M0601C_FRAME_HEADER;
-    cmd[1] = M0601C_FRAME_HEADER2;
-    cmd[2] = M0601C_CMD_SPEED_CONTROL;
-    cmd[3] = motor->id;
-    cmd[4] = (uint8_t)(speed_rpm >> 8);   /* Speed high byte */
-    cmd[5] = (uint8_t)(speed_rpm & 0xFF); /* Speed low byte */
-    cmd[6] = 0x00;
-    cmd[7] = 0x00;
-    cmd[8] = 0x00;
-    cmd[9] = M0601C_CRC8(cmd, 9);
-
-    return M0601C_RS485_Transmit(cmd, 10);
+    return &motor->feedback;
 }
 
-/**
- * @brief Current control command
- * @param motor      Motor handle
- * @param current_ma Target current in mA (-8000 to 8000)
- */
-HAL_StatusTypeDef M0601C_CurrentControl(M0601C_MotorHandle_t *motor, int16_t current_ma)
-{
-    uint8_t cmd[10];
-    cmd[0] = M0601C_FRAME_HEADER;
-    cmd[1] = M0601C_FRAME_HEADER2;
-    cmd[2] = M0601C_CMD_CURRENT_CONTROL;
-    cmd[3] = motor->id;
-    cmd[4] = (uint8_t)(current_ma >> 8);   /* Current high byte */
-    cmd[5] = (uint8_t)(current_ma & 0xFF); /* Current low byte */
-    cmd[6] = 0x00;
-    cmd[7] = 0x00;
-    cmd[8] = 0x00;
-    cmd[9] = M0601C_CRC8(cmd, 9);
-
-    return M0601C_RS485_Transmit(cmd, 10);
-}
-
-/**
- * @brief Brake command
- * @param motor Motor handle
- */
-HAL_StatusTypeDef M0601C_Brake(M0601C_MotorHandle_t *motor)
-{
-    uint8_t cmd[10];
-    cmd[0] = M0601C_FRAME_HEADER;
-    cmd[1] = M0601C_FRAME_HEADER2;
-    cmd[2] = M0601C_CMD_BRAKE;
-    cmd[3] = motor->id;
-    memset(&cmd[4], 0, 5);
-    cmd[9] = M0601C_CRC8(cmd, 9);
-
-    return M0601C_RS485_Transmit(cmd, 10);
-}
-
-/**
- * @brief Idle (freewheel) command
- * @param motor Motor handle
- */
-HAL_StatusTypeDef M0601C_Idle(M0601C_MotorHandle_t *motor)
-{
-    uint8_t cmd[10];
-    cmd[0] = M0601C_FRAME_HEADER;
-    cmd[1] = M0601C_FRAME_HEADER2;
-    cmd[2] = M0601C_CMD_IDLE;
-    cmd[3] = motor->id;
-    memset(&cmd[4], 0, 5);
-    cmd[9] = M0601C_CRC8(cmd, 9);
-
-    return M0601C_RS485_Transmit(cmd, 10);
-}
-
-/**
- * @brief Request feedback from motor
- * @param motor Motor handle
- */
-HAL_StatusTypeDef M0601C_RequestFeedback(M0601C_MotorHandle_t *motor)
-{
-    uint8_t cmd[10];
-    cmd[0] = M0601C_FRAME_HEADER;
-    cmd[1] = M0601C_FRAME_HEADER2;
-    cmd[2] = M0601C_CMD_READ_FEEDBACK;
-    cmd[3] = motor->id;
-    memset(&cmd[4], 0, 5);
-    cmd[9] = M0601C_CRC8(cmd, 9);
-
-    return M0601C_RS485_Transmit(cmd, 10);
-}
-
-/**
- * @brief Set motor control mode
- * @param motor Motor handle
- * @param mode  Control mode
- */
-HAL_StatusTypeDef M0601C_SetMode(M0601C_MotorHandle_t *motor, M0601C_Mode_e mode)
-{
-    uint8_t cmd[10];
-    cmd[0] = M0601C_FRAME_HEADER;
-    cmd[1] = M0601C_FRAME_HEADER2;
-    cmd[2] = (uint8_t)mode;
-    cmd[3] = motor->id;
-    memset(&cmd[4], 0, 5);
-    cmd[9] = M0601C_CRC8(cmd, 9);
-
-    return M0601C_RS485_Transmit(cmd, 10);
-}
-
-/**
- * @brief Parse a 10-byte feedback frame and update motor handle
- * @param motor Motor handle to update
- * @param data  10-byte feedback frame (CRC already verified)
- * @return true if data was valid and matched motor ID
- */
 bool M0601C_UpdateFeedback(M0601C_MotorHandle_t *motor, uint8_t *data)
 {
     if (data[0] != motor->id) {
@@ -318,20 +255,18 @@ bool M0601C_UpdateFeedback(M0601C_MotorHandle_t *motor, uint8_t *data)
     motor->feedback.motor_id = data[0];
     motor->feedback.mode = data[1];
 
-    /* Current: DATA[2:3] signed 16-bit, formula: mA = 8000 * raw / 32767 */
+    /* 电流: DATA[2:3] signed 16-bit, mA = 8000 * raw / 32767 */
     int16_t current_raw = (int16_t)((data[2] << 8) | data[3]);
     motor->feedback.current_ma = (int16_t)((8000L * current_raw) / 32767);
 
-    /* Speed: DATA[4:5] = RPM signed 16-bit */
+    /* 速度: DATA[4:5] signed 16-bit RPM */
     motor->feedback.speed_rpm = (int16_t)((data[4] << 8) | data[5]);
 
-    /* Position: DATA[6:7] = unsigned 16-bit */
+    /* 位置: DATA[6:7] unsigned 16-bit */
     motor->feedback.position_raw = (uint16_t)((data[6] << 8) | data[7]);
-
-    /* Convert to angle: pos * 360 / 32768 */
     motor->feedback.position_deg = (float)motor->feedback.position_raw * 360.0f / 32768.0f;
 
-    /* Temperature / status */
+    /* 温度: DATA[8] */
     motor->feedback.temperature = data[8];
 
     motor->feedback.is_valid = true;
@@ -342,21 +277,6 @@ bool M0601C_UpdateFeedback(M0601C_MotorHandle_t *motor, uint8_t *data)
     return true;
 }
 
-/**
- * @brief Get pointer to motor feedback data
- * @param motor Motor handle
- * @return Pointer to feedback structure
- */
-M0601C_Feedback_t* M0601C_GetFeedback(M0601C_MotorHandle_t *motor)
-{
-    return &motor->feedback;
-}
-
-/**
- * @brief Check if motor is online (received data within timeout)
- * @param motor Motor handle
- * @return true if online
- */
 bool M0601C_CheckOnline(M0601C_MotorHandle_t *motor)
 {
     if (motor->is_online &&
@@ -367,65 +287,56 @@ bool M0601C_CheckOnline(M0601C_MotorHandle_t *motor)
     return false;
 }
 
+/* ============================================================================
+ *                          RS485 RX 处理
+ * ============================================================================ */
+
 /**
- * @brief RS485 UART RX callback (byte-by-byte collection)
- * @param byte Received byte
- * @note Called from USART1 IRQ handler
- */
+  * @brief RS485 UART RX 中断回调（逐字节收集）
+  * @note  原协议无帧头，DATA[0] 即为电机 ID。收集满 10 字节即完成。
+  */
 void M0601C_RS485_RxCallback(uint8_t byte)
 {
-    if (g_rx_complete) {
-        /* Frame already complete, waiting for processing */
+    if (g_rx_idx >= M0601C_FRAME_LEN) {
         return;
     }
-
-    /* Start of frame detection */
-    if (g_rx_idx == 0 && byte != M0601C_FRAME_HEADER) {
-        return; /* Not a valid start byte */
-    }
-
-    if (g_rx_idx == 1 && byte != M0601C_FRAME_HEADER2) {
-        g_rx_idx = 0; /* Reset, invalid second header */
-        return;
-    }
-
     g_rx_buf[g_rx_idx++] = byte;
-
-    /* Complete 10-byte frame received */
-    if (g_rx_idx >= 10) {
-        g_rx_idx = 0;
+    if (g_rx_idx >= M0601C_FRAME_LEN) {
         g_rx_complete = true;
     }
 }
 
 /**
- * @brief Process complete RS485 frame (call from task context)
- * @param motor_handles Array of motor handles to check
- * @param num_motors    Number of motors in array
- * @return true if a valid frame was processed
- */
+  * @brief 处理已完成的 RS485 接收帧（在任务上下文中调用）
+  * @param motors     电机句柄数组
+  * @param num_motors 电机数量
+  * @retval true  成功匹配并更新了一个电机
+  */
 bool M0601C_ProcessRxFrame(M0601C_MotorHandle_t *motors, uint8_t num_motors)
 {
     if (!g_rx_complete) {
         return false;
     }
 
-    /* Verify CRC */
-    uint8_t calc_crc = M0601C_CRC8((uint8_t *)g_rx_buf, 9);
-    if (calc_crc != g_rx_buf[9]) {
+    /* CRC 校验 */
+    uint8_t calc = M0601C_CRC8((const uint8_t *)g_rx_buf, 9);
+    if (calc != g_rx_buf[9]) {
+        g_rx_idx = 0;
         g_rx_complete = false;
         return false;
     }
 
-    /* Find matching motor by ID and update */
+    /* 按 ID 匹配电机 */
     bool matched = false;
     for (uint8_t i = 0; i < num_motors; i++) {
-        if (M0601C_UpdateFeedback(&motors[i], (uint8_t *)g_rx_buf)) {
+        if (g_rx_buf[0] == motors[i].id) {
+            M0601C_UpdateFeedback(&motors[i], (uint8_t *)g_rx_buf);
             matched = true;
             break;
         }
     }
 
+    g_rx_idx = 0;
     g_rx_complete = false;
     return matched;
 }
