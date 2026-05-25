@@ -160,6 +160,11 @@
           <WinNumber>1</WinNumber>
           <ItemText>g_can_rx_raw_ide</ItemText>
         </Ww>
+        <Ww>
+          <count>2</count>
+          <WinNumber>1</WinNumber>
+          <ItemText>g_debug_rx_motor_id</ItemText>
+        </Ww>
       </WatchWindow1>
       <WatchWindow2>
         <Ww>

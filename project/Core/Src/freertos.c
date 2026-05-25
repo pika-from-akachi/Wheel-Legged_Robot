@@ -288,9 +288,9 @@ void Task_EL05_Motor(void *argument)
             osMutexRelease(mutex_CAN);
             osDelay(5);
 
-            /* Enable motor */
+            /* Disable motor — rotation logic temporarily stopped for ID setup */
             osMutexAcquire(mutex_CAN, osWaitForever);
-            EL05_Enable(&motor1);
+            EL05_Disable(&motor1);
             osMutexRelease(mutex_CAN);
             osDelay(10);
 
@@ -302,12 +302,12 @@ void Task_EL05_Motor(void *argument)
             initialized = 1;
         }
 
-        /* MIT control: torque-only mode (like RS01 move_control with T=5) */
-        mit.p_des = 0.0f;     /* target position */
-        mit.v_des = 3.0f;     /* target velocity */
-        mit.kp    = 0.0f;     /* no position stiffness */
-        mit.kd    = 0.5f;     /* light damping */
-        mit.t_ff  = 1.0f;     /* feedforward torque */
+        /* MIT control paused — all outputs zeroed */
+        mit.p_des = 0.0f;
+        mit.v_des = 0.0f;
+        mit.kp    = 0.0f;
+        mit.kd    = 0.0f;
+        mit.t_ff  = 0.0f;
 
         osMutexAcquire(mutex_CAN, osWaitForever);
         EL05_MitControl(&motor1, &mit);

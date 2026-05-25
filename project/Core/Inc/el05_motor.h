@@ -110,9 +110,13 @@ HAL_StatusTypeDef EL05_SetMode(EL05_MotorHandle_t *motor, EL05_ControlMode_e mod
 HAL_StatusTypeDef EL05_WriteParam(EL05_MotorHandle_t *motor, uint16_t param_addr, float param_value);
 HAL_StatusTypeDef EL05_WriteParamU8(EL05_MotorHandle_t *motor, uint16_t param_addr, uint8_t param_value);
 HAL_StatusTypeDef EL05_ReadParam(EL05_MotorHandle_t *motor, uint16_t param_addr);
+HAL_StatusTypeDef EL05_SetMotorId(EL05_MotorHandle_t *motor, uint8_t new_id);
 EL05_MotorFeedback_t* EL05_GetFeedback(EL05_MotorHandle_t *motor);
 uint8_t EL05_CheckOnline(EL05_MotorHandle_t *motor, uint32_t timeout_ms);
 void EL05_CAN_RxCallback(CAN_HandleTypeDef *hcan);
+
+/* Debug: last received motor ID from CAN response frame (Keil Watch窗口查看) */
+extern volatile uint8_t g_debug_rx_motor_id;
 
 #ifdef __cplusplus
 }

@@ -180,6 +180,12 @@ int main(void)
   motor1.mode = EL05_MODE_MIT;
   motor1.state = EL05_STATE_DISABLE;
   motor1.is_online = 0;
+
+  /* 设置挂载在总线的电机ID为2（参照例程SampleProgram的Set_CAN_ID方式） */
+  if (EL05_SetMotorId(&motor1, 4) == HAL_OK) {
+      HAL_Delay(50);      /* 等待CAN帧发送完成 */
+      motor1.can_id = 4;  /* 更新本地句柄以匹配电机新ID */
+  }
   /* USER CODE END 2 */
 
   /* Init scheduler */
