@@ -180,16 +180,15 @@ This project uses **FreeRTOS V10.6.2** with a comprehensive task-based architect
 
 ### Task Overview
 
+### Task Overview
+
 | Task | Hardware | Frequency | Priority | Stack | Description |
 |------|----------|-----------|----------|-------|-------------|
-| **IMU** | ICM-42688-P | 1kHz | Medium (3) | 1KB | IMU data processing (raw read by TIM2 ISR) |
-| **LQR** | Control Algorithm | 1kHz | High (5) | 4KB | LQR state feedback & safety monitoring |
-| **Balance** | Control Algorithm | 500Hz | High (5) | 4KB | Balance control, state estimation, complementary filter |
-| **Motor** | EL05 + M0601C | 200Hz | Medium-High (4) | 2KB | Motor command processing for all 6 motors |
-| **Remote** | NRF24L01+ | 100Hz | Medium (3) | 2KB | Remote controller data reading |
-| **ESP32 COM** | ESP32-S3 (UART3) | 50Hz | Low (1) | 2KB | Wireless tuning bridge & state broadcast |
-| **Monitor** | System Safety | 10Hz | Low (2) | 1KB | System status monitoring |
-| **Debug** | Diagnostics | 1Hz | Lowest (1) | 1KB | Debug output |
+| **IMU** | ICM-42688-P | 1kHz | Medium | 1KB | IMU data processing (raw read by TIM2 ISR) |
+| **Remote** | NRF24L01+ | 100Hz | High | 2KB | Remote controller data reading |
+| **EL05 Motor** | EL05 (CAN) | 10Hz | Medium | 2KB | **Single task** sequentially controls 4 joint motors |
+| **Monitor** | System Safety | 10Hz | Low | 1KB | System status monitoring |
+| **Debug** | Diagnostics | 1Hz | Lowest | 1KB | Debug output |
 
 ### Task Communication
 
@@ -394,12 +393,42 @@ The wireless tuning interface is a single-page application built with:
 
 ### EL05 Joint Motors (CAN Bus)
 
-| Motor ID | Location | CAN ID | Type |
-|----------|----------|--------|------|
-| M1 | Left Hip | 1 | EL05 |
-| M2 | Left Knee | 2 | EL05 |
-| M3 | Right Hip | 3 | EL05 |
-| M4 | Right Knee | 4 | EL05 |
+| Motor ID | Location | CAN ID | Index | Type |
+|----------|----------|--------|-------|------|
+| M1 | Left Hip Front | 1 | 0 | EL05 |
+| M2 | Right Hip Front | 2 | 1 | EL05 |
+| M3 | Left Hip Rear | 3 | 2 | EL05 (mirror of M1) |
+| M4 | Right Hip Rear | 4 | 3 | EL05 (mirror of M2) |
+
+### Action Group 1: Init Max Leg Height (动作组1: 初始化到最大腿高)
+
+The robot's 4 joint motors are controlled by a single FreeRTOS task that sequentially
+configures and commands each motor via CAN. The target positions are:
+
+| Motor | CAN ID | Zero Approach | Zero Position | Target Position |
+|-------|--------|---------------|---------------|-----------------|
+| M1 | 1 | CCW small angle | 0 rad | **+1.5708 rad (+90°)** |
+| M2 | 2 | CW via 2π | 6.2832 rad | **4.3633 rad (-110°)** |
+| M3 | 3 | CW via 2π | 6.2832 rad | **4.7124 rad (-90°)** |
+| M4 | 4 | CCW small angle | 0 rad | **+1.9199 rad (+110°)** |
+
+The 2π offset ensures all motors approach their zero position
+in the correct direction (CW for motors on one side, CCW for the mirrored opposite side).
+
+Control sequence: `Configure PP mode → Disable(clear fault) → Enable → Send zero positions → Send targets → 10Hz hold loop`
+
+```c
+// freertos.c — Action Group 1 motor configuration
+static const struct { uint8_t idx; float zero; float target; } g_action1[4] = {
+    {0, 0.0f,    1.5708f},   /* M1: CCW zero → +90° */
+    {1, 6.2832f, 4.3633f},   /* M2: CW zero(2π) → -110° */
+    {2, 6.2832f, 4.7124f},   /* M3: CW zero(2π) → -90°(mirror) */
+    {3, 0.0f,    1.9199f},   /* M4: CCW zero → +110°(mirror) */
+};
+void Task_EL05_Motor(void *argument) {
+    /* Sequentially configure → enable → zero → target → hold loop */
+}
+```
 
 ### M0601C Hub Motors (RS485 Bus)
 

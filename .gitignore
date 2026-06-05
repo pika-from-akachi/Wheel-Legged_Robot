@@ -10,3 +10,25 @@ Thumbs.db
 
 # Claude project config (kept out of version control)
 .claude/
+
+# Keil MDK build artifacts
+project/MDK-ARM/*.log
+project/MDK-ARM/WheelRobot/*.o
+project/MDK-ARM/WheelRobot/*.axf
+project/MDK-ARM/WheelRobot/*.hex
+project/MDK-ARM/WheelRobot/*.bin
+project/MDK-ARM/WheelRobot/*.map
+project/MDK-ARM/WheelRobot/*.htm
+
+# IAR build artifacts
+EWARM/Obj/
+EWARM/Listings/
+EWARM/*.dep
+
+# Python
+__pycache__/
+*.pyc
+
+# Large files (exceeds GitHub size limit)
+esp32_app/data/3d/wode_dao_dun.glb
+tools/wheel-legged-sim/meshes/wode_dao_dun.obj

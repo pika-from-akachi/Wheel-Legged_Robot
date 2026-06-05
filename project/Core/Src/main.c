@@ -25,13 +25,14 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <string.h>
 #include "nrf24l01_rx.h"
 #include "icm42688.h"
 #include "el05_motor.h"
-#include "m0601c_motor.h"
-#include "lqr_control.h"
-#include "robot_model.h"
-#include "esp32_com.h"
+//#include "m0601c_motor.h"   // disabled — not in build
+//#include "lqr_control.h"
+//#include "robot_model.h"
+//#include "esp32_com.h"      // disabled — not in build
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -112,14 +113,32 @@ extern volatile uint8_t g_debug_new_address_sent[5];
 // EL05电机句柄 (4个关节电机)
 EL05_MotorHandle_t g_el05_motors[4];
 
-// M0601C电机句柄数组 (2个轮毂电机)
-M0601C_MotorHandle_t g_m0601c_motors[2];
-
-// M0601C电机UART句柄（RS485 via USART1）
+// UART句柄 (保留定义, 供Init函数引用)
 UART_HandleTypeDef huart1;
-
-// ESP32通信UART句柄（USART3, PB10=TX, PB11=RX）
 UART_HandleTypeDef huart3;
+
+// EL05电机句柄 (单个, 供el05_motor.o的CAN RX回调使用)
+EL05_MotorHandle_t motor1;
+
+// ===== 链接存根: 以下符号由 motor_driver.o 引用但未参与构建 =====
+uint8_t g_rxCpltCallback = 0;
+uint8_t g_rxBufRaw[10] = {0};
+uint8_t g_crcError = 0;
+
+typedef struct {
+    uint8_t dmaRxStarted; uint8_t rxCpltCallback; uint8_t crcError;
+    uint8_t lastCrcCalc;  uint8_t lastCrcRecv;    uint8_t txStatus;
+    uint8_t reserved[3];  uint8_t rxBufRaw[10];   uint8_t rxBufValid;
+} DebugInfo_t;
+DebugInfo_t g_debug = {0};
+
+// HAL UART 存根 (motor_driver.o 需要)
+HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *huart, const uint8_t *pData, uint16_t Size, uint32_t Timeout) { return HAL_OK; }
+HAL_StatusTypeDef HAL_UART_Receive_DMA(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size) { return HAL_OK; }
+HAL_StatusTypeDef HAL_UART_Init(UART_HandleTypeDef *huart) { return HAL_OK; }
+void HAL_UART_MspInit(UART_HandleTypeDef *huart) {}
+void HAL_UART_MspDeInit(UART_HandleTypeDef *huart) {}
+HAL_StatusTypeDef HAL_UART_Receive(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size, uint32_t Timeout) { return HAL_OK; }
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -181,31 +200,33 @@ int main(void)
       g_el05_motors[i].is_online = 0;
   }
 
-  /* ===== M0601C Hub Motors (RS485, IDs 1-2) ===== */
-  /* Initialize USART1 for RS485 (PB6=TX, PB7=RX), PE0=DIR control */
-  MX_USART1_UART_Init();
-  M0601C_Init(&huart1, GPIOE, GPIO_PIN_0);
+  /* 本地匹配, 不涉及CAN通信: 让CAN RX回调能识别电机1的响应帧 */
+  motor1.can_id = 1;
 
-  for (int i = 0; i < 2; i++) {
-      g_m0601c_motors[i].id = i + 1;
-      g_m0601c_motors[i].mode = M0601C_MODE_SPEED;
-      g_m0601c_motors[i].state = M0601C_STATE_DISABLED;
-      g_m0601c_motors[i].is_online = false;
-  }
+  /* motor1.can_id = 1 : 让CAN RX回调能识别电机1的反馈帧 (不是改电机硬件ID) */
+  motor1.can_id = 1;
 
-  /* ===== ESP32 Communication (USART3, PB10=TX, PB11=RX) ===== */
-  MX_USART3_UART_Init();
-  ESP32_COM_Init(&huart3);
-  ESP32_COM_StartRx();
+  /* ===== M0601C Hub Motors (RS485) — DISABLED (not in build) ===== */
+  //MX_USART1_UART_Init();
+  //M0601C_Init(&huart1, GPIOE, GPIO_PIN_0);
+  //for (int i = 0; i < 2; i++) {
+  //    g_m0601c_motors[i].id = i + 1;
+  //    g_m0601c_motors[i].mode = M0601C_MODE_SPEED;
+  //    g_m0601c_motors[i].state = M0601C_STATE_DISABLED;
+  //    g_m0601c_motors[i].is_online = false;
+  //}
 
-  /* ===== Robot Model & LQR Initialization ===== */
-  ROBOT_Init();
-  LQR_Init(&g_lqr_controller);
-  LQR_SetDefaultTuning(&g_lqr_tuning);
-  LQR_ComputeGains(&g_lqr_tuning, &g_lqr_controller.gain);
+  /* ===== ESP32 Communication (USART3) — DISABLED ===== */
+  //MX_USART3_UART_Init();
+  //ESP32_COM_Init(&huart3);
+  //ESP32_COM_StartRx();
 
-  /* Default to standing mode (disabled, waiting for enable command) */
-  LQR_SetMode(&g_lqr_controller, ROBOT_MODE_STANDING);
+  // ===== Robot Model & LQR disabled for motor test =====
+  //ROBOT_Init();
+  //LQR_Init(&g_lqr_controller);
+  //LQR_SetDefaultTuning(&g_lqr_tuning);
+  //LQR_ComputeGains(&g_lqr_tuning, &g_lqr_controller.gain);
+  //LQR_SetMode(&g_lqr_controller, ROBOT_MODE_STANDING);
 
   /* USER CODE END 2 */
 
@@ -375,27 +396,19 @@ void MX_USART3_UART_Init(void)
  * ============================================================================ */
 
 /**
- * @brief USART1 IRQ handler - M0601C RS485 byte reception
+ * @brief USART1 IRQ handler — DISABLED (not in build)
  */
 void USART1_IRQHandler(void)
 {
-    if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_RXNE)) {
-        uint8_t byte = (uint8_t)(huart1.Instance->DR & 0xFF);
-        M0601C_RS485_RxCallback(byte);
-        __HAL_UART_CLEAR_FLAG(&huart1, UART_FLAG_RXNE);
-    }
+    /* UART not initialized — should never fire */
 }
 
 /**
- * @brief USART3 IRQ handler - ESP32 communication byte reception
+ * @brief USART3 IRQ handler — DISABLED (not in build)
  */
 void USART3_IRQHandler(void)
 {
-    if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_RXNE)) {
-        uint8_t byte = (uint8_t)(huart3.Instance->DR & 0xFF);
-        ESP32_COM_UART_IRQHandler(byte);
-        __HAL_UART_CLEAR_FLAG(&huart3, UART_FLAG_RXNE);
-    }
+    /* UART not initialized — should never fire */
 }
 /* USER CODE END 4 */
 

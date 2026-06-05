@@ -37,6 +37,16 @@ static uint8_t g_tx_data[8];
 /* Debug: last received motor ID from CAN response (Bit15~8 of ExtId) */
 volatile uint8_t g_debug_rx_motor_id = 0;
 
+/* Debug: CAN RX callback chain trace (Keil Watch查看) */
+volatile uint32_t g_dbg_cb_fired   = 0;
+volatile uint32_t g_dbg_rx_msg_ok  = 0;
+volatile uint32_t g_dbg_rx_ext     = 0;
+volatile uint32_t g_dbg_rx_mode2   = 0;
+volatile uint32_t g_dbg_rx_matched = 0;
+volatile uint32_t g_dbg_rx_ide     = 0;
+volatile uint32_t g_dbg_rx_mode    = 0;
+volatile uint32_t g_dbg_rx_mid     = 0;
+
 /* Private function prototypes ----------------------------------------------*/
 static HAL_StatusTypeDef EL05_SendCANFrame(uint32_t ext_id, uint8_t *data, uint8_t dlc);
 static uint32_t EL05_BuildExtId(uint8_t mode, uint16_t data2, uint8_t motor_id);
@@ -268,6 +278,16 @@ HAL_StatusTypeDef EL05_ReadParam(EL05_MotorHandle_t *motor, uint16_t param_addr)
 }
 
 /**
+ * @brief Set current position as zero (通信类型6)
+ */
+HAL_StatusTypeDef EL05_SetZeroPosition(EL05_MotorHandle_t *motor)
+{
+    uint32_t ext_id = EL05_BuildExtId(6, EL05_MASTER_ID, motor->can_id);
+    uint8_t data[8] = {0};
+    return EL05_SendCANFrame(ext_id, data, 8);
+}
+
+/**
  * @brief Set motor CAN ID over the bus (通信类型7)
  * @note  参照例程 SampleProgram 的 Set_CAN_ID 实现。
  *        ExtID: mode=7, data2=(new_id<<8)|master_id, id=motor->can_id
@@ -279,6 +299,30 @@ HAL_StatusTypeDef EL05_SetMotorId(EL05_MotorHandle_t *motor, uint8_t new_id)
     uint32_t ext_id = EL05_BuildExtId(7,
                         (uint16_t)(((uint16_t)new_id << 8) | EL05_MASTER_ID),
                         motor->can_id);
+    uint8_t data[8] = {0};
+    return EL05_SendCANFrame(ext_id, data, 8);
+}
+
+/**
+ * @brief Set motor protocol mode (通信类型0x19)
+ * @note  必须在Enable之前调用
+ *        mode_type = 0x01 → MIT模式
+ */
+HAL_StatusTypeDef EL05_SetMotorType(EL05_MotorHandle_t *motor, uint8_t mode_type)
+{
+    uint32_t ext_id = EL05_BuildExtId(0x19, EL05_MASTER_ID, motor->can_id);
+    uint8_t data[8] = {0};
+    data[0] = mode_type;
+    return EL05_SendCANFrame(ext_id, data, 8);
+}
+
+/**
+ * @brief Save motor parameters to NVRAM (通信类型0x16)
+ * @note  参数掉电不丢失。调用后需等待1秒再操作
+ */
+HAL_StatusTypeDef EL05_MotorDataSave(EL05_MotorHandle_t *motor)
+{
+    uint32_t ext_id = EL05_BuildExtId(0x16, EL05_MASTER_ID, motor->can_id);
     uint8_t data[8] = {0};
     return EL05_SendCANFrame(ext_id, data, 8);
 }
@@ -297,6 +341,7 @@ void EL05_CAN_RxCallback(CAN_HandleTypeDef *hcan)
     if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rx_header, rx_data) != HAL_OK) {
         return;
     }
+    g_dbg_rx_msg_ok++;
 
     // Capture EVERY received frame for debugging (regardless of type)
     extern volatile uint32_t g_can_rx_raw_id;
@@ -313,27 +358,39 @@ void EL05_CAN_RxCallback(CAN_HandleTypeDef *hcan)
     g_debug_rx_motor_id = (rx_header.ExtId >> 8) & 0xFF;
 
     // Only process extended frames
+    g_dbg_rx_ide = rx_header.IDE;
     if (rx_header.IDE != CAN_ID_EXT) {
         return;
     }
+    g_dbg_rx_ext++;
 
     // Extract communication type from Bit28~24
     uint8_t mode = (rx_header.ExtId >> 24) & 0x1F;
+    g_dbg_rx_mode = mode;
 
     // Only process motor response (type 2)
     if (mode != 2) {
         return;
     }
+    g_dbg_rx_mode2++;
 
     // Extract motor ID from Bit15~8 (RS01 protocol: response ID is in upper byte)
     uint8_t motor_id = (rx_header.ExtId >> 8) & 0xFF;
+    g_dbg_rx_mid = motor_id;
 
-    // Find motor handle by can_id (check extern motor1)
-    extern EL05_MotorHandle_t motor1;
-    EL05_MotorHandle_t *motor = &motor1;
-    if (motor->can_id != motor_id) {
+    // Find motor handle by can_id (search global array)
+    extern EL05_MotorHandle_t g_el05_motors[4];
+    EL05_MotorHandle_t *motor = NULL;
+    for (int i = 0; i < 4; i++) {
+        if (g_el05_motors[i].can_id == motor_id) {
+            motor = &g_el05_motors[i];
+            break;
+        }
+    }
+    if (motor == NULL) {
         return;
     }
+    g_dbg_rx_matched++;
 
     // Parse Byte0: id(4bit) + mode_state(4bit)
     motor->feedback.id = (rx_data[0] >> 4) & 0x0F;
@@ -357,6 +414,10 @@ void EL05_CAN_RxCallback(CAN_HandleTypeDef *hcan)
     // Parse temperature from ExtID Bit23~8
     uint16_t temp_uint = (rx_header.ExtId >> 8) & 0xFFFF;
     motor->feedback.temperature = uint_to_float(temp_uint, -40.0f, 200.0f, 16);
+
+    // Capture all 8 raw bytes for debug
+    extern volatile uint8_t g_can_rx_raw[8];
+    for (int i = 0; i < 8; i++) g_can_rx_raw[i] = rx_data[i];
 
     // Update online status
     motor->last_update_time = HAL_GetTick();

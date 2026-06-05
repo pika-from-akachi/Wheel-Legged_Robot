@@ -111,6 +111,9 @@ HAL_StatusTypeDef EL05_WriteParam(EL05_MotorHandle_t *motor, uint16_t param_addr
 HAL_StatusTypeDef EL05_WriteParamU8(EL05_MotorHandle_t *motor, uint16_t param_addr, uint8_t param_value);
 HAL_StatusTypeDef EL05_ReadParam(EL05_MotorHandle_t *motor, uint16_t param_addr);
 HAL_StatusTypeDef EL05_SetMotorId(EL05_MotorHandle_t *motor, uint8_t new_id);
+HAL_StatusTypeDef EL05_SetMotorType(EL05_MotorHandle_t *motor, uint8_t mode_type);  /* 0x19 */
+HAL_StatusTypeDef EL05_MotorDataSave(EL05_MotorHandle_t *motor);                      /* 0x16 */
+HAL_StatusTypeDef EL05_SetZeroPosition(EL05_MotorHandle_t *motor);                    /* 0x06 */
 EL05_MotorFeedback_t* EL05_GetFeedback(EL05_MotorHandle_t *motor);
 uint8_t EL05_CheckOnline(EL05_MotorHandle_t *motor, uint32_t timeout_ms);
 void EL05_CAN_RxCallback(CAN_HandleTypeDef *hcan);

@@ -9,6 +9,8 @@
 
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
+    extern volatile uint32_t g_dbg_cb_fired;
+    g_dbg_cb_fired++;
     EL05_CAN_RxCallback(hcan);
 }
 

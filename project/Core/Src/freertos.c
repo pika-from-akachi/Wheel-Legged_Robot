@@ -16,6 +16,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <string.h>
+#include <math.h>
 #include "icm42688.h"
 #include "nrf24l01_rx.h"
 #include "freertos_tasks.h"
@@ -72,7 +73,7 @@ static ICM42688_RawData_t g_imu_raw_buf[2];
 static volatile uint32_t g_imu_raw_active_idx = 0;
 
 /* ===== Unique to this file ===== */
-osThreadId_t taskHandle_EL05_Motor;       /* EL05 joint motor task */
+osThreadId_t taskHandle_EL05_Motor;       /* EL05 4电机顺序控制任务 */
 osThreadId_t taskHandle_M0601C_Motor;     /* M0601C wheel motor task */
 osThreadId_t taskHandle_CAN;              /* CAN communication task */
 
@@ -90,8 +91,8 @@ volatile uint32_t g_m0601c_motor_update_count = 0;
 volatile uint32_t g_can_tx_count = 0;
 volatile uint32_t g_can_rx_count = 0;
 
-/* External motor handles */
-extern EL05_MotorHandle_t motor1;
+/* External motor handles (array of 4 joint motors, IDs 1-4) */
+extern EL05_MotorHandle_t g_el05_motors[4];
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -105,8 +106,8 @@ const osThreadAttr_t defaultTask_attributes = {
 /* USER CODE BEGIN FunctionPrototypes */
 /* Unique tasks (only defined in this file) */
 void Task_EL05_Motor(void *argument);
-void Task_M0601C_Motor(void *argument);
-void Task_CAN(void *argument);
+//void Task_M0601C_Motor(void *argument);  // disabled for motor test
+//void Task_CAN(void *argument);            // disabled for motor test
 /* Other tasks (Task_IMU, Task_Remote, etc.) are declared in freertos_tasks.h */
 /* USER CODE END FunctionPrototypes */
 
@@ -186,6 +187,7 @@ void MX_FREERTOS_Init(void) {
     taskHandle_EL05_Motor = osThreadNew(Task_EL05_Motor, NULL, &attr);
   }
 
+#if 0  // DISABLED for motor test
   /* M0601C wheel motor task (50Hz) - reads remote joystick → drives wheels */
   {
     const osThreadAttr_t attr = {
@@ -205,16 +207,17 @@ void MX_FREERTOS_Init(void) {
     };
     taskHandle_CAN = osThreadNew(Task_CAN, NULL, &attr);
   }
+#endif
 
-  /* Balance control task (500Hz) */
-  {
-    const osThreadAttr_t attr = {
-      .name = "Balance_Task",
-      .stack_size = 4096,
-      .priority = (osPriority_t) osPriorityAboveNormal2,
-    };
-    taskHandle_Balance = osThreadNew(Task_Balance, NULL, &attr);
-  }
+  /* Balance control task (500Hz) — DISABLED for motor test */
+  //{
+  //  const osThreadAttr_t attr = {
+  //    .name = "Balance_Task",
+  //    .stack_size = 4096,
+  //    .priority = (osPriority_t) osPriorityAboveNormal2,
+  //  };
+  //  taskHandle_Balance = osThreadNew(Task_Balance, NULL, &attr);
+  //}
 
   /* System monitor task (10Hz) */
   {
@@ -265,57 +268,148 @@ void StartDefaultTask(void *argument)
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
 
-/**
-  * @brief EL05 motor — MIT torque control via private protocol type 1
-  */
+/* ============================================================================
+ *                          EL05 MOTOR DEBUG VARIABLES
+ * ============================================================================
+ */
+volatile float    debug_m1_pos_target   = 0.0f;
+volatile float    debug_m1_kp           = 0.0f;
+volatile float    debug_m1_kd           = 0.0f;
+volatile uint8_t  debug_m1_state        = 0;
+volatile uint8_t  debug_m1_is_online    = 0;
+volatile float    debug_m1_fb_pos       = 0.0f;
+volatile float    debug_m1_fb_vel       = 0.0f;
+volatile float    debug_m1_fb_trq       = 0.0f;
+volatile float    debug_m1_fb_temp      = 0.0f;
+volatile uint8_t  debug_m1_fb_fault     = 0;
+volatile uint32_t debug_m1_phase_elapsed = 0;
+volatile uint32_t debug_m1_loop_count   = 0;
+volatile uint32_t debug_m1_can_status   = 0;
+volatile float    debug_targets[4]      = {0};     // 4个电机当前目标
+volatile uint8_t  debug_active_idx      = 0;       // 当前缓动电机索引
+volatile uint8_t  debug_enable_flags[4] = {0};     // 使能返回值
+volatile uint32_t debug_can_tx_ok[4]   = {0};     // MIT发送成功计数
+volatile uint32_t debug_can_tx_fail[4] = {0};     // MIT发送失败计数
+volatile uint8_t  debug_task_phase      = 0;       // 电机任务执行阶段
+volatile float    debug_m3_fb_pos       = 0.0f;    // 电机3位置反馈
+volatile float    debug_m3_fb_fault     = 0.0f;    // 电机3报错
+volatile uint8_t  debug_m3_is_online    = 0;       // 电机3在线
+volatile float    debug_action1_fb_pos       = 0.0f;    // 电机4位置反馈
+volatile float    debug_action1_fb_fault     = 0.0f;    // 电机4报错
+volatile uint8_t  debug_action1_is_online    = 0;       // 电机4在线
+
+/* CAN RX调试计数器 (定义在 Motor_Drivers/EL05_MOTOR_DRIVE/Core/Src/el05_motor.c) */
+extern volatile uint32_t g_dbg_cb_fired;
+extern volatile uint32_t g_dbg_rx_msg_ok;
+extern volatile uint32_t g_dbg_rx_ext;
+extern volatile uint32_t g_dbg_rx_mode2;
+extern volatile uint32_t g_dbg_rx_matched;
+extern volatile uint32_t g_dbg_rx_ide;
+extern volatile uint32_t g_dbg_rx_mode;
+extern volatile uint32_t g_dbg_rx_mid;
+
+/* 编译的 el05_motor.o 用 motor1 接收CAN反馈 */
+extern EL05_MotorHandle_t motor1;
+
+/* ============================================================================
+ *                          动作组1: 初始化到最大腿高
+ *                           Action Group 1: Init Max Leg Height
+ * ============================================================================
+ * 所有4个关节电机: 归零 → 转到最大腿高位置 → 保持
+ *
+ * 电机编号与安装:
+ *   左腿: 电机1(髋前) + 电机3(髋后)  — 外侧对侧安装, 方向取反
+ *   右腿: 电机2(髋前) + 电机4(髋后)  — 外侧对侧安装, 方向取反
+ *
+ * 角度约定: 2π修正使电机顺时针方向转动到位
+ * ============================================================================ */
+
+/* 动作组1电机配置: {g_el05_motors索引, 归零位置(2π修正), 目标位置(2π修正)} */
+static const struct {
+    uint8_t idx;    /* g_el05_motors[]索引 */
+    float zero;     /* 归零位置(rad), 2π修正使电机正向/反向到位 */
+    float target;   /* 目标位置(rad) = 最大腿高 */
+} g_action1[4] = {
+    /* 左腿前 */   {0, 0.0f,    1.5708f},   /* 电机1: CCW归零 -> +90DEG (+1.5708rad) */
+    /* 右腿前 */   {1, 6.2832f, 4.3633f},   /* 电机2:  CW归零 -> -110DEG (2PI-1.9199=4.3633rad) */
+    /* 左腿后 */   {2, 6.2832f, 4.7124f},   /* 电机3:  CW归零 -> -90DEG  (2PI-PI/2=4.7124rad) 镜像1 */
+    /* 右腿后 */   {3, 0.0f,    1.9199f},   /* 电机4: CCW归零 -> +110DEG (1.9199rad) 镜像2 */
+};
+
 void Task_EL05_Motor(void *argument)
 {
-    EL05_MitControl_t mit;
     uint32_t tick;
-    uint8_t initialized = 0;
-
     (void)argument;
-
     osDelay(200);
-    tick = osKernelGetTickCount();
 
-    for (;;)
-    {
-        if (!initialized) {
-            /* Set run_mode = 0 (MIT/运控模式) */
-            osMutexAcquire(mutex_CAN, osWaitForever);
-            EL05_WriteParamU8(&motor1, 0x7005, 0);
-            osMutexRelease(mutex_CAN);
-            osDelay(5);
-
-            /* Disable motor — rotation logic temporarily stopped for ID setup */
-            osMutexAcquire(mutex_CAN, osWaitForever);
-            EL05_Disable(&motor1);
-            osMutexRelease(mutex_CAN);
-            osDelay(10);
-
-            /* Write current limit */
-            osMutexAcquire(mutex_CAN, osWaitForever);
-            EL05_WriteParam(&motor1, 0x7018, 5.0f);
-            osMutexRelease(mutex_CAN);
-
-            initialized = 1;
-        }
-
-        /* MIT control paused — all outputs zeroed */
-        mit.p_des = 0.0f;
-        mit.v_des = 0.0f;
-        mit.kp    = 0.0f;
-        mit.kd    = 0.0f;
-        mit.t_ff  = 0.0f;
-
+    /* Step 1: 4电机依次配置PP模式+限速限力矩 */
+    for (int i = 0; i < 4; i++) {
+        EL05_MotorHandle_t *m = &g_el05_motors[g_action1[i].idx];
         osMutexAcquire(mutex_CAN, osWaitForever);
-        EL05_MitControl(&motor1, &mit);
-        osMutexRelease(mutex_CAN);
+        EL05_WriteParamU8(m, 0x7005, 1);
+        osMutexRelease(mutex_CAN);      osDelay(2);
+        osMutexAcquire(mutex_CAN, osWaitForever);
+        EL05_WriteParam(m, 0x7017, 2.0f);
+        osMutexRelease(mutex_CAN);      osDelay(2);
+        osMutexAcquire(mutex_CAN, osWaitForever);
+        EL05_WriteParam(m, 0x7018, 3.0f);
+        osMutexRelease(mutex_CAN);      osDelay(2);
+    }
 
+    /* Step 2: 依次Disable清故障->Enable */
+    for (int i = 0; i < 4; i++) {
+        EL05_MotorHandle_t *m = &g_el05_motors[g_action1[i].idx];
+        osMutexAcquire(mutex_CAN, osWaitForever);
+        EL05_Disable(m);
+        osMutexRelease(mutex_CAN);      osDelay(50);
+        osMutexAcquire(mutex_CAN, osWaitForever);
+        EL05_Enable(m);
+        osMutexRelease(mutex_CAN);      osDelay(50);
+    }
+    osDelay(400);
+
+    /* Step 3: 全部归零 */
+    for (int i = 0; i < 4; i++) {
+        EL05_MotorHandle_t *m = &g_el05_motors[g_action1[i].idx];
+        osMutexAcquire(mutex_CAN, osWaitForever);
+        EL05_WriteParam(m, 0x7016, g_action1[i].zero);
+        osMutexRelease(mutex_CAN);
+        debug_targets[g_action1[i].idx] = g_action1[i].zero;
+        osDelay(3);
+    }
+    osDelay(4000);
+
+    /* Step 4: 全部转到目标 */
+    for (int i = 0; i < 4; i++) {
+        EL05_MotorHandle_t *m = &g_el05_motors[g_action1[i].idx];
+        osMutexAcquire(mutex_CAN, osWaitForever);
+        EL05_WriteParam(m, 0x7016, g_action1[i].target);
+        osMutexRelease(mutex_CAN);
+        debug_targets[g_action1[i].idx] = g_action1[i].target;
+        osDelay(3);
+    }
+    osDelay(2000);
+
+    /* Step 5: 10Hz循环保持 */
+    tick = osKernelGetTickCount();
+    for (;;) {
+        for (int i = 0; i < 4; i++) {
+            EL05_MotorHandle_t *m = &g_el05_motors[g_action1[i].idx];
+            osMutexAcquire(mutex_CAN, osWaitForever);
+            EL05_WriteParam(m, 0x7016, g_action1[i].target);
+            osMutexRelease(mutex_CAN);
+            debug_targets[g_action1[i].idx] = g_action1[i].target;
+        }
+        debug_m1_fb_pos   = g_el05_motors[0].feedback.position;
+        debug_m1_fb_fault = g_el05_motors[0].feedback.fault;
+        debug_m3_fb_pos   = g_el05_motors[2].feedback.position;
+        debug_m3_fb_fault = g_el05_motors[2].feedback.fault;
+        debug_m3_is_online = g_el05_motors[2].is_online;
+        debug_action1_fb_pos   = g_el05_motors[3].feedback.position;
+        debug_action1_fb_fault = g_el05_motors[3].feedback.fault;
+        debug_action1_is_online = g_el05_motors[3].is_online;
         g_el05_motor_update_count++;
-        osDelayUntil(tick + 10);
-        tick += 10;
+        osDelayUntil(tick + 100);
     }
 }
 
@@ -344,6 +438,10 @@ volatile uint8_t  g_motor_fb_fault = 0;
 volatile uint8_t  g_motor_fb_id = 0;
 volatile uint8_t  g_motor_fb_mode_state = 0;
 
+/* Raw CAN response bytes (for debugging position encoding) */
+volatile uint8_t  g_can_rx_raw[8] = {0};
+
+#if 0  // DISABLED for motor test
 /**
   * @brief M0601C wheel motor control task (50Hz)
   * @note  Reads remote joystick from queue_RemoteData,
@@ -433,7 +531,9 @@ void Task_M0601C_Motor(void *argument)
         tick += 20;
     }
 }
+#endif /* DISABLED for motor test */
 
+#if 0  // DISABLED for motor test
 /**
   * @brief CAN communication management task (500Hz)
   * @note  Handles CAN TX/RX for EL05 motors
@@ -457,6 +557,7 @@ void Task_CAN(void *argument)
         tick += 2;
     }
 }
+#endif /* DISABLED for motor test */
 
 /**
   * @brief Stack overflow hook function
@@ -561,6 +662,7 @@ void Task_IMU(void *argument)
     }
 }
 
+#if 0  // DISABLED for motor test
 /**
   * @brief Balance control task (high priority, 500Hz)
   */
@@ -593,6 +695,7 @@ void Task_Balance(void *argument)
         tick_start += 2;
     }
 }
+#endif /* DISABLED for motor test */
 
 /**
   * @brief Remote control task (100Hz)

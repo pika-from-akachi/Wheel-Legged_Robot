@@ -45,16 +45,18 @@
 
 /* USER CODE BEGIN Includes */
 /* Section where include file can be added */
+#include <stdint.h>
+#ifndef CMSIS_device_header
+#define CMSIS_device_header "stm32f4xx.h"
+#endif /* CMSIS_device_header */
+#include CMSIS_device_header  /* ensure SystemCoreClock is defined */
+extern uint32_t SystemCoreClock;
 /* USER CODE END Includes */
 
 /* Ensure definitions are only used by the compiler, and not by the assembler. */
 #if defined(__ICCARM__) || defined(__CC_ARM) || defined(__GNUC__)
-  #include <stdint.h>
-  extern uint32_t SystemCoreClock;
+
 #endif
-#ifndef CMSIS_device_header
-#define CMSIS_device_header "stm32f4xx.h"
-#endif /* CMSIS_device_header */
 
 #define configENABLE_FPU                         1
 #define configENABLE_MPU                         0
