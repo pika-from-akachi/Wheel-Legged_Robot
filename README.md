@@ -6,7 +6,9 @@
 [![Language](https://img.shields.io/badge/Language-C-orange.svg)](https://en.wikipedia.org/wiki/C_(programming_language))
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**English** | [中文](#中文文档)
+**English** | [**中文**](#中文文档)
+
+> 🔄 [English Version](#overview) · [中文版本](#中文文档)
 
 ---
 
@@ -1026,10 +1028,7 @@ int main(void) {
 |------|------|------|--------|--------|------|
 | **IMU** | ICM-42688-P | 1kHz | 中 | 1KB | IMU数据处理（原始读取由TIM2 ISR完成） |
 | **Remote** | NRF24L01+ | 100Hz | 高 | 2KB | 遥控器数据读取 |
-| **EL05 Motor** | EL05 (CAN) | 100Hz | 中高 | 2KB | 关节电机控制（CAN） |
-| **M0601C Motor** | M0601C (UART) | 100Hz | 中高 | 2KB | 轮毂电机控制（UART） |
-| **CAN** | CAN总线 | 500Hz | 高 | 2KB | CAN通信管理 |
-| **Balance** | 控制算法 | 500Hz | 高 | 4KB | 平衡控制算法 |
+| **EL05 Motor** | EL05 (CAN) | 10Hz | 中 | 2KB | **单任务**顺序控制4个关节电机 |
 | **Monitor** | 系统安全 | 10Hz | 低 | 1KB | 系统状态监控 |
 | **Debug** | 诊断输出 | 1Hz | 最低 | 1KB | 调试输出 |
 
@@ -1141,6 +1140,44 @@ Wheel-Legged_Robot/
 ├── MDK-ARM/                           # Keil MDK工程文件
 ├── EWARM/                             # IAR EWARM工程文件
 └── WheelRobot.ioc                     # STM32CubeMX配置文件
+```
+
+---
+
+## 电机配置
+
+### EL05关节电机（CAN总线）
+
+| 电机编号 | 安装位置 | CAN ID | 数组索引 | 说明 |
+|----------|----------|--------|----------|------|
+| M1 | 左腿髋前 | 1 | 0 | EL05 |
+| M2 | 右腿髋前 | 2 | 1 | EL05 |
+| M3 | 左腿髋后 | 3 | 2 | EL05 (M1镜像) |
+| M4 | 右腿髋后 | 4 | 3 | EL05 (M2镜像) |
+
+### 动作组1: 初始化到最大腿高
+
+4个关节电机由**单个 FreeRTOS 任务**顺序控制，依次通过 CAN 总线发送指令：
+
+| 电机 | CAN ID | 归零方式 | 归零位置 | 目标位置 |
+|------|--------|----------|----------|----------|
+| M1 | 1 | 逆时针小角度 | 0 rad | **+1.5708 rad (+90°)** |
+| M2 | 2 | 顺时针走2π | 6.2832 rad | **4.3633 rad (-110°)** |
+| M3 | 3 | 顺时针走2π | 6.2832 rad | **4.7124 rad (-90°)** |
+| M4 | 4 | 逆时针小角度 | 0 rad | **+1.9199 rad (+110°)** |
+
+2π偏移修正确保电机从正确方向到达零点（对侧安装的电机方向取反）。
+
+控制顺序：`配置PP模式 → Disable清故障 → Enable → 发送归零位置 → 发送目标位置 → 10Hz保持循环`
+
+```c
+// freertos.c — 动作组1 电机参数配置
+static const struct { uint8_t idx; float zero; float target; } g_action1[4] = {
+    {0, 0.0f,    1.5708f},   /* M1: 逆时针归零 → +90°  */
+    {1, 6.2832f, 4.3633f},   /* M2: 顺时针2π归零 → -110° */
+    {2, 6.2832f, 4.7124f},   /* M3: 顺时针2π归零 → -90°(镜像) */
+    {3, 0.0f,    1.9199f},   /* M4: 逆时针归零 → +110°(镜像) */
+};
 ```
 
 ---
