@@ -402,33 +402,50 @@ The wireless tuning interface is a single-page application built with:
 | M3 | Left Hip Rear | 3 | 2 | EL05 (mirror of M1) |
 | M4 | Right Hip Rear | 4 | 3 | EL05 (mirror of M2) |
 
-### Action Group 1: Init Max Leg Height (动作组1: 初始化到最大腿高)
+### Action Group 0: Min Leg Height (动作组0: 最小腿高/归零)
 
-The robot's 4 joint motors are controlled by a single FreeRTOS task that sequentially
-configures and commands each motor via CAN. The target positions are:
+Pure homing — all 4 joint motors return to their mechanical zero positions (minimum leg height).
 
-| Motor | CAN ID | Zero Approach | Zero Position | Target Position |
-|-------|--------|---------------|---------------|-----------------|
-| M1 | 1 | CCW small angle | 0 rad | **+1.5708 rad (+90°)** |
-| M2 | 2 | CW via 2π | 6.2832 rad | **4.3633 rad (-110°)** |
-| M3 | 3 | CW via 2π | 6.2832 rad | **4.7124 rad (-90°)** |
-| M4 | 4 | CCW small angle | 0 rad | **+1.9199 rad (+110°)** |
-
-The 2π offset ensures all motors approach their zero position
-in the correct direction (CW for motors on one side, CCW for the mirrored opposite side).
-
-Control sequence: `Configure PP mode → Disable(clear fault) → Enable → Send zero positions → Send targets → 10Hz hold loop`
+| Motor | CAN ID | Zero Approach | Zero Position |
+|-------|--------|---------------|---------------|
+| M1 | 1 | CCW small angle | **0 rad** |
+| M2 | 2 | CW via 2π | **6.2832 rad** |
+| M3 | 3 | CW via 2π | **6.2832 rad** |
+| M4 | 4 | CCW small angle | **0 rad** |
 
 ```c
-// freertos.c — Action Group 1 motor configuration
-static const struct { uint8_t idx; float zero; float target; } g_action1[4] = {
-    {0, 0.0f,    1.5708f},   /* M1: CCW zero → +90° */
-    {1, 6.2832f, 4.3633f},   /* M2: CW zero(2π) → -110° */
-    {2, 6.2832f, 4.7124f},   /* M3: CW zero(2π) → -90°(mirror) */
-    {3, 0.0f,    1.9199f},   /* M4: CCW zero → +110°(mirror) */
+// freertos.c — Action Group 0: homing positions
+static const float g_action0[4] = {
+    0.0f,      /* M1/idx0: CCW zero */
+    6.2832f,   /* M2/idx1: CW zero(2π) */
+    6.2832f,   /* M3/idx2: CW zero(2π) mirror */
+    0.0f,      /* M4/idx3: CCW zero mirror */
 };
+```
+
+### Action Group 1: Init Max Leg Height (动作组1: 初始化到最大腿高)
+
+Go to zero first (Action Group 0), then rotate to max leg height positions.
+
+| Motor | CAN ID | Target Position |
+|-------|--------|-----------------|
+| M1 | 1 | **+1.5708 rad (+90°)** |
+| M2 | 2 | **4.3633 rad (-110°)** |
+| M3 | 3 | **4.7124 rad (-90°)** |
+| M4 | 4 | **+1.9199 rad (+110°)** |
+
+Control sequence: `Configure PP mode → Disable(clear fault) → Enable → Apply Action Group 0 (homing) → Apply Action Group 1 (target) → 10Hz hold loop`
+
+```c
+// freertos.c — Action Groups 0 & 1
+static const float g_action0[4] = { /* homing */ };
+static const float g_action1[4] = { /* targets */ };
+
 void Task_EL05_Motor(void *argument) {
-    /* Sequentially configure → enable → zero → target → hold loop */
+    /* Step 1-2: Configure & enable all 4 motors */
+    /* Step 3: Apply g_action0[i] → homing (min leg height) */
+    /* Step 4: Apply g_action1[i] → max leg height */
+    /* Step 5: 10Hz loop hold g_action1[i] */
 }
 ```
 
@@ -1155,29 +1172,51 @@ Wheel-Legged_Robot/
 | M3 | 左腿髋后 | 3 | 2 | EL05 (M1镜像) |
 | M4 | 右腿髋后 | 4 | 3 | EL05 (M2镜像) |
 
-### 动作组1: 初始化到最大腿高
+### 动作组0: 最小腿高 (归零位置)
 
-4个关节电机由**单个 FreeRTOS 任务**顺序控制，依次通过 CAN 总线发送指令：
+纯归零动作 — 4个关节电机全部回到机械零点位置，即最小腿高。
 
-| 电机 | CAN ID | 归零方式 | 归零位置 | 目标位置 |
-|------|--------|----------|----------|----------|
-| M1 | 1 | 逆时针小角度 | 0 rad | **+1.5708 rad (+90°)** |
-| M2 | 2 | 顺时针走2π | 6.2832 rad | **4.3633 rad (-110°)** |
-| M3 | 3 | 顺时针走2π | 6.2832 rad | **4.7124 rad (-90°)** |
-| M4 | 4 | 逆时针小角度 | 0 rad | **+1.9199 rad (+110°)** |
-
-2π偏移修正确保电机从正确方向到达零点（对侧安装的电机方向取反）。
-
-控制顺序：`配置PP模式 → Disable清故障 → Enable → 发送归零位置 → 发送目标位置 → 10Hz保持循环`
+| 电机 | CAN ID | 归零方式 | 归零位置 |
+|------|--------|----------|----------|
+| M1 | 1 | 逆时针小角度 | **0 rad** |
+| M2 | 2 | 顺时针走2π | **6.2832 rad** |
+| M3 | 3 | 顺时针走2π | **6.2832 rad** |
+| M4 | 4 | 逆时针小角度 | **0 rad** |
 
 ```c
-// freertos.c — 动作组1 电机参数配置
-static const struct { uint8_t idx; float zero; float target; } g_action1[4] = {
-    {0, 0.0f,    1.5708f},   /* M1: 逆时针归零 → +90°  */
-    {1, 6.2832f, 4.3633f},   /* M2: 顺时针2π归零 → -110° */
-    {2, 6.2832f, 4.7124f},   /* M3: 顺时针2π归零 → -90°(镜像) */
-    {3, 0.0f,    1.9199f},   /* M4: 逆时针归零 → +110°(镜像) */
+// freertos.c — 动作组0: 归零位置
+static const float g_action0[4] = {
+    0.0f,      /* M1/idx0: 逆时针归零 */
+    6.2832f,   /* M2/idx1: 顺时针2π归零 */
+    6.2832f,   /* M3/idx2: 顺时针2π归零 镜像 */
+    0.0f,      /* M4/idx3: 逆时针归零 镜像 */
 };
+```
+
+### 动作组1: 初始化到最大腿高
+
+先执行动作组0归零（最小腿高），再转到最大腿高位置。
+
+| 电机 | CAN ID | 目标位置 |
+|------|--------|----------|
+| M1 | 1 | **+1.5708 rad (+90°)** |
+| M2 | 2 | **4.3633 rad (-110°)** |
+| M3 | 3 | **4.7124 rad (-90°)** |
+| M4 | 4 | **+1.9199 rad (+110°)** |
+
+控制顺序：`配置PP模式 → Disable清故障 → Enable → 动作组0(归零) → 动作组1(目标) → 10Hz保持循环`
+
+```c
+// freertos.c — 动作组0(归零) + 动作组1(目标) 分离定义
+static const float g_action0[4] = { /* 归零位置 */ };
+static const float g_action1[4] = { /* 目标位置 */ };
+
+void Task_EL05_Motor(void *argument) {
+    /* Step 1-2: 配置 & 使能4电机 */
+    /* Step 3: g_action0[i] → 最小腿高 */
+    /* Step 4: g_action1[i] → 最大腿高 */
+    /* Step 5: 10Hz保持 g_action1[i] */
+}
 ```
 
 ---

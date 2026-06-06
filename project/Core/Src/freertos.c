@@ -312,28 +312,39 @@ extern volatile uint32_t g_dbg_rx_mid;
 extern EL05_MotorHandle_t motor1;
 
 /* ============================================================================
+ *                          动作组0: 最小腿高 (归零位置)
+ *                           Action Group 0: Min Leg Height (Homing)
+ * ============================================================================
+ * 所有4个关节电机回到机械零点, 即最小腿高位置
+ * ============================================================================ */
+
+/* 动作组0: 各电机归零位置 (rad), 2π修正使电机从正确方向到达零点 */
+static const float g_action0[4] = {
+    0.0f,      /* M1/idx0: CCW小角度归零 */
+    6.2832f,   /* M2/idx1: CW归零(2π) */
+    6.2832f,   /* M3/idx2: CW归零(2π) 镜像1 */
+    0.0f,      /* M4/idx3: CCW小角度归零 镜像2 */
+};
+
+/* ============================================================================
  *                          动作组1: 初始化到最大腿高
  *                           Action Group 1: Init Max Leg Height
  * ============================================================================
- * 所有4个关节电机: 归零 → 转到最大腿高位置 → 保持
+ * 在归零基础上转到最大腿高位置 → 保持
  *
  * 电机编号与安装:
  *   左腿: 电机1(髋前) + 电机3(髋后)  — 外侧对侧安装, 方向取反
  *   右腿: 电机2(髋前) + 电机4(髋后)  — 外侧对侧安装, 方向取反
  *
- * 角度约定: 2π修正使电机顺时针方向转动到位
+ * 角度约定: 先走动作组0归零, 再走动作组1到最大腿高
  * ============================================================================ */
 
-/* 动作组1电机配置: {g_el05_motors索引, 归零位置(2π修正), 目标位置(2π修正)} */
-static const struct {
-    uint8_t idx;    /* g_el05_motors[]索引 */
-    float zero;     /* 归零位置(rad), 2π修正使电机正向/反向到位 */
-    float target;   /* 目标位置(rad) = 最大腿高 */
-} g_action1[4] = {
-    /* 左腿前 */   {0, 0.0f,    1.5708f},   /* 电机1: CCW归零 -> +90DEG (+1.5708rad) */
-    /* 右腿前 */   {1, 6.2832f, 4.3633f},   /* 电机2:  CW归零 -> -110DEG (2PI-1.9199=4.3633rad) */
-    /* 左腿后 */   {2, 6.2832f, 4.7124f},   /* 电机3:  CW归零 -> -90DEG  (2PI-PI/2=4.7124rad) 镜像1 */
-    /* 右腿后 */   {3, 0.0f,    1.9199f},   /* 电机4: CCW归零 -> +110DEG (1.9199rad) 镜像2 */
+/* 动作组1: 各电机目标位置 (rad) = 最大腿高 */
+static const float g_action1[4] = {
+    1.5708f,   /* M1/idx0: +90° */
+    4.3633f,   /* M2/idx1: -110° (2π-1.9199) */
+    4.7124f,   /* M3/idx2: -90°  (2π-π/2) 镜像1 */
+    1.9199f,   /* M4/idx3: +110° 镜像2 */
 };
 
 void Task_EL05_Motor(void *argument)
@@ -344,7 +355,7 @@ void Task_EL05_Motor(void *argument)
 
     /* Step 1: 4电机依次配置PP模式+限速限力矩 */
     for (int i = 0; i < 4; i++) {
-        EL05_MotorHandle_t *m = &g_el05_motors[g_action1[i].idx];
+        EL05_MotorHandle_t *m = &g_el05_motors[i];
         osMutexAcquire(mutex_CAN, osWaitForever);
         EL05_WriteParamU8(m, 0x7005, 1);
         osMutexRelease(mutex_CAN);      osDelay(2);
@@ -358,7 +369,7 @@ void Task_EL05_Motor(void *argument)
 
     /* Step 2: 依次Disable清故障->Enable */
     for (int i = 0; i < 4; i++) {
-        EL05_MotorHandle_t *m = &g_el05_motors[g_action1[i].idx];
+        EL05_MotorHandle_t *m = &g_el05_motors[i];
         osMutexAcquire(mutex_CAN, osWaitForever);
         EL05_Disable(m);
         osMutexRelease(mutex_CAN);      osDelay(50);
@@ -370,22 +381,22 @@ void Task_EL05_Motor(void *argument)
 
     /* Step 3: 全部归零 */
     for (int i = 0; i < 4; i++) {
-        EL05_MotorHandle_t *m = &g_el05_motors[g_action1[i].idx];
+        EL05_MotorHandle_t *m = &g_el05_motors[i];
         osMutexAcquire(mutex_CAN, osWaitForever);
-        EL05_WriteParam(m, 0x7016, g_action1[i].zero);
+        EL05_WriteParam(m, 0x7016, g_action0[i]);
         osMutexRelease(mutex_CAN);
-        debug_targets[g_action1[i].idx] = g_action1[i].zero;
+        debug_targets[i] = g_action0[i];
         osDelay(3);
     }
     osDelay(4000);
 
     /* Step 4: 全部转到目标 */
     for (int i = 0; i < 4; i++) {
-        EL05_MotorHandle_t *m = &g_el05_motors[g_action1[i].idx];
+        EL05_MotorHandle_t *m = &g_el05_motors[i];
         osMutexAcquire(mutex_CAN, osWaitForever);
-        EL05_WriteParam(m, 0x7016, g_action1[i].target);
+        EL05_WriteParam(m, 0x7016, g_action1[i]);
         osMutexRelease(mutex_CAN);
-        debug_targets[g_action1[i].idx] = g_action1[i].target;
+        debug_targets[i] = g_action1[i];
         osDelay(3);
     }
     osDelay(2000);
@@ -394,11 +405,11 @@ void Task_EL05_Motor(void *argument)
     tick = osKernelGetTickCount();
     for (;;) {
         for (int i = 0; i < 4; i++) {
-            EL05_MotorHandle_t *m = &g_el05_motors[g_action1[i].idx];
+            EL05_MotorHandle_t *m = &g_el05_motors[i];
             osMutexAcquire(mutex_CAN, osWaitForever);
-            EL05_WriteParam(m, 0x7016, g_action1[i].target);
+            EL05_WriteParam(m, 0x7016, g_action1[i]);
             osMutexRelease(mutex_CAN);
-            debug_targets[g_action1[i].idx] = g_action1[i].target;
+            debug_targets[i] = g_action1[i];
         }
         debug_m1_fb_pos   = g_el05_motors[0].feedback.position;
         debug_m1_fb_fault = g_el05_motors[0].feedback.fault;
