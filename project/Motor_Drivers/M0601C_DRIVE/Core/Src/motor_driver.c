@@ -74,17 +74,37 @@ static const uint8_t s_crc8_maxim_table[256] = {
 /* ============================================================================ */
 
 /**
- * @brief  通过 UART1 DMA 发送一帧数据
- * @param  pBuf : 指向 10 字节发送缓冲区
- * @retval HAL_StatusTypeDef
- * @note   使用 DMA 发送可避免阻塞 CPU；若不想用 DMA，可改为阻塞式 HAL_UART_Transmit
+ * @brief  THVD1410DR RS485方向控制: 发送模式
+ * @note   RE#=1, DE=1 → 驱动器使能, 接收器禁用
+ */
+static void RS485_TX_Mode(void)
+{
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_3, GPIO_PIN_SET);   /* RE# = 1 */
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_4, GPIO_PIN_SET);   /* DE  = 1 */
+}
+
+/**
+ * @brief  THVD1410DR RS485方向控制: 接收模式
+ * @note   RE#=0, DE=0 → 驱动器禁用, 接收器使能
+ */
+static void RS485_RX_Mode(void)
+{
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_3, GPIO_PIN_RESET); /* RE# = 0 */
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_4, GPIO_PIN_RESET); /* DE  = 0 */
+}
+
+/**
+ * @brief  通过 USART2 发送一帧数据 (带RS485方向切换)
  */
 static HAL_StatusTypeDef MOTOR_UART_Tx(const uint8_t *pBuf)
 {
-    /* 这里使用 HAL_UART_Transmit（阻塞式），兼容性强；如果你的工程已使能 DMA，可换成：
-     * return HAL_UART_Transmit_DMA(&huart1, pBuf, MOTOR_FRAME_LEN);
-     */
-    return HAL_UART_Transmit(&huart1, pBuf, MOTOR_FRAME_LEN, 100U);
+    HAL_StatusTypeDef status;
+
+    RS485_TX_Mode();                                          /* 切到发送 */
+    status = HAL_UART_Transmit(&huart2, pBuf, MOTOR_FRAME_LEN, 100U);
+    RS485_RX_Mode();                                          /* 回接收 */
+
+    return status;
 }
 
 /* ============================================================================ */
@@ -265,7 +285,8 @@ HAL_StatusTypeDef MOTOR_Stop(uint8_t motorId)
  */
 HAL_StatusTypeDef MOTOR_StartReceive(void)
 {
-    return HAL_UART_Receive_DMA(&huart1, s_rxBuf, MOTOR_FRAME_LEN);
+    RS485_RX_Mode();  /* 确保在接收模式 */
+    return HAL_UART_Receive_DMA(&huart2, s_rxBuf, MOTOR_FRAME_LEN);
 }
 
 /**
@@ -300,7 +321,7 @@ void MOTOR_PrintFeedback(MotorFeedback_t *pFeedback)
  */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    if (huart->Instance == USART1) {
+    if (huart->Instance == USART2) {
         /* 声明外部调试变量 */
         extern uint8_t g_rxCpltCallback;
         extern uint8_t g_crcError;
@@ -339,7 +360,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         }
 
         /* 重新启动接收 */
-        HAL_UART_Receive_DMA(&huart1, s_rxBuf, MOTOR_FRAME_LEN);
+        HAL_UART_Receive_DMA(&huart2, s_rxBuf, MOTOR_FRAME_LEN);
     }
 }
 

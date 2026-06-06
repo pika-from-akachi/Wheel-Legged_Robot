@@ -115,12 +115,13 @@ EL05_MotorHandle_t g_el05_motors[4];
 
 // UART句柄 (保留定义, 供Init函数引用)
 UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;   /* USART2: M0601C RS485 */
 UART_HandleTypeDef huart3;
 
 // EL05电机句柄 (单个, 供el05_motor.o的CAN RX回调使用)
 EL05_MotorHandle_t motor1;
 
-// ===== 链接存根: 以下符号由 motor_driver.o 引用但未参与构建 =====
+// ===== 调试变量 (motor_driver.c 引用) =====
 uint8_t g_rxCpltCallback = 0;
 uint8_t g_rxBufRaw[10] = {0};
 uint8_t g_crcError = 0;
@@ -131,14 +132,6 @@ typedef struct {
     uint8_t reserved[3];  uint8_t rxBufRaw[10];   uint8_t rxBufValid;
 } DebugInfo_t;
 DebugInfo_t g_debug = {0};
-
-// HAL UART 存根 (motor_driver.o 需要)
-HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *huart, const uint8_t *pData, uint16_t Size, uint32_t Timeout) { return HAL_OK; }
-HAL_StatusTypeDef HAL_UART_Receive_DMA(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size) { return HAL_OK; }
-HAL_StatusTypeDef HAL_UART_Init(UART_HandleTypeDef *huart) { return HAL_OK; }
-void HAL_UART_MspInit(UART_HandleTypeDef *huart) {}
-void HAL_UART_MspDeInit(UART_HandleTypeDef *huart) {}
-HAL_StatusTypeDef HAL_UART_Receive(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size, uint32_t Timeout) { return HAL_OK; }
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -146,6 +139,61 @@ void SystemClock_Config(void);
 void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
 void MX_USART1_UART_Init(void);
+void MX_USART2_UART_Init(void);
+
+/* ============================================================================
+ *                          USART2 INIT (M0601C RS485)
+ * ============================================================================
+ * PD5 = USART2_RX, PD6 = USART2_TX
+ * PD3 = RE# (active low), PD4 = DE (active high) — THVD1410DR
+ * Baud rate: 115200, 8N1
+ * ============================================================================ */
+
+void MX_USART2_UART_Init(void)
+{
+    /* Enable clocks */
+    __HAL_RCC_USART2_CLK_ENABLE();
+    __HAL_RCC_GPIOD_CLK_ENABLE();
+
+    /* Configure USART2 pins: PD5=RX, PD6=TX */
+    GPIO_InitTypeDef gpio = {0};
+    gpio.Pin = GPIO_PIN_5 | GPIO_PIN_6;
+    gpio.Mode = GPIO_MODE_AF_PP;
+    gpio.Pull = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    gpio.Alternate = GPIO_AF7_USART2;
+    HAL_GPIO_Init(GPIOD, &gpio);
+
+    /* Configure RS485 direction pins: PD3=RE#, PD4=DE */
+    gpio.Pin = GPIO_PIN_3 | GPIO_PIN_4;
+    gpio.Mode = GPIO_MODE_OUTPUT_PP;
+    gpio.Pull = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    gpio.Alternate = 0;
+    HAL_GPIO_Init(GPIOD, &gpio);
+    /* THVD1410DR: RE#=0, DE=0 → 接收模式 (默认) */
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_3, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_4, GPIO_PIN_RESET);
+
+    /* UART configuration */
+    huart2.Instance = USART2;
+    huart2.Init.BaudRate = 115200;
+    huart2.Init.WordLength = UART_WORDLENGTH_8B;
+    huart2.Init.StopBits = UART_STOPBITS_1;
+    huart2.Init.Parity = UART_PARITY_NONE;
+    huart2.Init.Mode = UART_MODE_TX_RX;
+    huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+    if (HAL_UART_Init(&huart2) != HAL_OK) {
+        Error_Handler();
+    }
+
+    /* Enable USART2 interrupt for RS485 byte reception */
+    HAL_NVIC_SetPriority(USART2_IRQn, 6, 0);
+    HAL_NVIC_EnableIRQ(USART2_IRQn);
+    __HAL_UART_ENABLE_IT(&huart2, UART_IT_RXNE);
+}
+
 void MX_USART3_UART_Init(void);
 /* USER CODE END PFP */
 

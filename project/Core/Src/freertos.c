@@ -390,27 +390,30 @@ void Task_EL05_Motor(void *argument)
     }
     osDelay(4000);
 
-    /* Step 4: 全部转到目标 */
-    for (int i = 0; i < 4; i++) {
-        EL05_MotorHandle_t *m = &g_el05_motors[i];
-        osMutexAcquire(mutex_CAN, osWaitForever);
-        EL05_WriteParam(m, 0x7016, g_action1[i]);
-        osMutexRelease(mutex_CAN);
-        debug_targets[i] = g_action1[i];
-        osDelay(3);
-    }
-    osDelay(2000);
+    /* Step 4: 启动轮毂电机ID1 (M0601C, RS485) */
+    #define WHEEL_SPEED  50   /* 50 RPM */
+    osMutexAcquire(mutex_UART1, osWaitForever);
+    MOTOR_SendModeSwitchCmd(1, MOTOR_CTRL_SPEED);
+    osMutexRelease(mutex_UART1);    osDelay(20);
+    osMutexAcquire(mutex_UART1, osWaitForever);
+    MOTOR_SetSpeed(1, WHEEL_SPEED);
+    osMutexRelease(mutex_UART1);
 
-    /* Step 5: 10Hz循环保持 */
+    /* Step 5: 10Hz循环保持 — 关节电机最小腿高 + 轮毂电机持续转动 */
     tick = osKernelGetTickCount();
     for (;;) {
         for (int i = 0; i < 4; i++) {
             EL05_MotorHandle_t *m = &g_el05_motors[i];
             osMutexAcquire(mutex_CAN, osWaitForever);
-            EL05_WriteParam(m, 0x7016, g_action1[i]);
+            EL05_WriteParam(m, 0x7016, g_action0[i]);
             osMutexRelease(mutex_CAN);
-            debug_targets[i] = g_action1[i];
+            debug_targets[i] = g_action0[i];
         }
+        /* 保持轮毂电机转速 */
+        osMutexAcquire(mutex_UART1, osWaitForever);
+        MOTOR_SetSpeed(1, WHEEL_SPEED);
+        osMutexRelease(mutex_UART1);
+
         debug_m1_fb_pos   = g_el05_motors[0].feedback.position;
         debug_m1_fb_fault = g_el05_motors[0].feedback.fault;
         debug_m3_fb_pos   = g_el05_motors[2].feedback.position;
