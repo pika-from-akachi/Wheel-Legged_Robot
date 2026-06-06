@@ -99,10 +99,21 @@ static void RS485_RX_Mode(void)
 static HAL_StatusTypeDef MOTOR_UART_Tx(const uint8_t *pBuf)
 {
     HAL_StatusTypeDef status;
+    uint32_t tick;
 
     RS485_TX_Mode();                                          /* 切到发送 */
+    for (volatile int i = 0; i < 20; i++);                    /* 短延时等收发器稳定 */
+
+    __HAL_UART_CLEAR_FLAG(&huart2, UART_FLAG_TC);             /* 清TC标志 */
     status = HAL_UART_Transmit(&huart2, pBuf, MOTOR_FRAME_LEN, 100U);
-    RS485_RX_Mode();                                          /* 回接收 */
+
+    /* 等待TC标志置位（最后一字节已从移位寄存器发出） */
+    tick = HAL_GetTick();
+    while (!__HAL_UART_GET_FLAG(&huart2, UART_FLAG_TC)) {
+        if (HAL_GetTick() - tick > 10) break;
+    }
+    for (volatile int i = 0; i < 5; i++);                     /* 额外保险延时 */
+    RS485_RX_Mode();                                          /* 切回接收 */
 
     return status;
 }

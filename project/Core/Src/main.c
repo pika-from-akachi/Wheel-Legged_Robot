@@ -139,7 +139,7 @@ void SystemClock_Config(void);
 void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
 void MX_USART1_UART_Init(void);
-void MX_USART2_UART_Init(void);
+HAL_StatusTypeDef MX_USART2_UART_Init(void);
 
 /* ============================================================================
  *                          USART2 INIT (M0601C RS485)
@@ -149,8 +149,9 @@ void MX_USART2_UART_Init(void);
  * Baud rate: 115200, 8N1
  * ============================================================================ */
 
-void MX_USART2_UART_Init(void)
+HAL_StatusTypeDef MX_USART2_UART_Init(void)
 {
+    HAL_StatusTypeDef status;
     /* Enable clocks */
     __HAL_RCC_USART2_CLK_ENABLE();
     __HAL_RCC_GPIOD_CLK_ENABLE();
@@ -185,13 +186,15 @@ void MX_USART2_UART_Init(void)
     huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
     huart2.Init.OverSampling = UART_OVERSAMPLING_16;
     if (HAL_UART_Init(&huart2) != HAL_OK) {
-        Error_Handler();
+        return HAL_ERROR;
     }
 
     /* Enable USART2 interrupt for RS485 byte reception */
     HAL_NVIC_SetPriority(USART2_IRQn, 6, 0);
     HAL_NVIC_EnableIRQ(USART2_IRQn);
     __HAL_UART_ENABLE_IT(&huart2, UART_IT_RXNE);
+
+    return HAL_OK;
 }
 
 void MX_USART3_UART_Init(void);
@@ -254,15 +257,9 @@ int main(void)
   /* motor1.can_id = 1 : 让CAN RX回调能识别电机1的反馈帧 (不是改电机硬件ID) */
   motor1.can_id = 1;
 
-  /* ===== M0601C Hub Motors (RS485) — DISABLED (not in build) ===== */
-  //MX_USART1_UART_Init();
-  //M0601C_Init(&huart1, GPIOE, GPIO_PIN_0);
-  //for (int i = 0; i < 2; i++) {
-  //    g_m0601c_motors[i].id = i + 1;
-  //    g_m0601c_motors[i].mode = M0601C_MODE_SPEED;
-  //    g_m0601c_motors[i].state = M0601C_STATE_DISABLED;
-  //    g_m0601c_motors[i].is_online = false;
-  //}
+  /* ===== M0601C Hub Motors (RS485 via USART2) ===== */
+  extern volatile uint8_t debug_uart2_init_ok;
+  debug_uart2_init_ok = (MX_USART2_UART_Init() == HAL_OK) ? 1 : 2;
 
   /* ===== ESP32 Communication (USART3) — DISABLED ===== */
   //MX_USART3_UART_Init();
