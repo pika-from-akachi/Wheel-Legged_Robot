@@ -29,6 +29,7 @@
 #include "nrf24l01_rx.h"
 #include "icm42688.h"
 #include "el05_motor.h"
+#include "motor_driver.h"
 //#include "m0601c_motor.h"   // disabled — not in build
 //#include "lqr_control.h"
 //#include "robot_model.h"
@@ -126,12 +127,10 @@ uint8_t g_rxCpltCallback = 0;
 uint8_t g_rxBufRaw[10] = {0};
 uint8_t g_crcError = 0;
 
-typedef struct {
-    uint8_t dmaRxStarted; uint8_t rxCpltCallback; uint8_t crcError;
-    uint8_t lastCrcCalc;  uint8_t lastCrcRecv;    uint8_t txStatus;
-    uint8_t reserved[3];  uint8_t rxBufRaw[10];   uint8_t rxBufValid;
-} DebugInfo_t;
 DebugInfo_t g_debug = {0};
+
+// 轮毂电机ID扫描结果 (Debugger Watch用)
+volatile uint8_t g_found_motor_id = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -260,6 +259,7 @@ int main(void)
   /* ===== M0601C Hub Motors (RS485 via USART2) ===== */
   extern volatile uint8_t debug_uart2_init_ok;
   debug_uart2_init_ok = (MX_USART2_UART_Init() == HAL_OK) ? 1 : 2;
+  MOTOR_StartReceive();
 
   /* ===== ESP32 Communication (USART3) — DISABLED ===== */
   //MX_USART3_UART_Init();
@@ -274,6 +274,11 @@ int main(void)
   //LQR_SetMode(&g_lqr_controller, ROBOT_MODE_STANDING);
 
   /* USER CODE END 2 */
+
+  /* ===== 轮毂电机 ID=1 驱动测试 (跟Task_EL05_Motor一致) ===== */
+  MOTOR_SendModeSwitchCmd(1, MOTOR_CTRL_SPEED);
+  HAL_Delay(20);
+  MOTOR_SetSpeed(1, 50);
 
   /* Init scheduler */
   osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
@@ -446,6 +451,15 @@ void MX_USART3_UART_Init(void)
 void USART1_IRQHandler(void)
 {
     /* UART not initialized — should never fire */
+}
+
+/**
+ * @brief USART2 IRQ handler
+ * @note  Forward to HAL for motor RS485 reception (IT mode)
+ */
+void USART2_IRQHandler(void)
+{
+    HAL_UART_IRQHandler(&huart2);
 }
 
 /**

@@ -73,7 +73,7 @@ static ICM42688_RawData_t g_imu_raw_buf[2];
 static volatile uint32_t g_imu_raw_active_idx = 0;
 
 /* ===== Unique to this file ===== */
-osThreadId_t taskHandle_EL05_Motor;       /* EL05 4电机顺序控制任务 */
+osThreadId_t taskHandle_EL05_Motor;       /* EL05 4电机顺序控制 + 轮毂电机1/2 */
 osThreadId_t taskHandle_M0601C_Motor;     /* M0601C wheel motor task */
 osThreadId_t taskHandle_CAN;              /* CAN communication task */
 
@@ -292,7 +292,9 @@ volatile uint32_t debug_can_tx_ok[4]   = {0};     // MIT发送成功计数
 volatile uint32_t debug_can_tx_fail[4] = {0};     // MIT发送失败计数
 volatile uint8_t  debug_task_phase      = 0;
 volatile uint8_t  debug_wheel_cmd_status = 0;  /* 0=未发,1=成功,2=失败 */
-volatile uint8_t  debug_uart2_init_ok = 0;      /* USART2初始化状态 */  /* 0=未发,1=成功,2=失败 */       // 电机任务执行阶段
+volatile uint8_t  debug_right_wheel_status = 0; /* 右轮毂(右腿,ID=2)指令状态 */
+volatile uint8_t  debug_uart2_init_ok = 0;
+volatile uint8_t dr0,dr1,dr2,dr3,dr4,dr5,dr6,dr7,dr8,dr9;  /* 反馈帧10字节 */  /* µVision Watch用 */
 volatile float    debug_m3_fb_pos       = 0.0f;    // 电机3位置反馈
 volatile float    debug_m3_fb_fault     = 0.0f;    // 电机3报错
 volatile uint8_t  debug_m3_is_online    = 0;       // 电机3在线
@@ -392,13 +394,18 @@ void Task_EL05_Motor(void *argument)
     }
     osDelay(4000);
 
-    /* Step 4: 启动轮毂电机ID1 (M0601C, RS485) */
-    #define WHEEL_SPEED  50   /* 50 RPM */
+    /* Step 4: 启动轮毂电机 ID1(左腿) + ID2(右腿) (M0601C, RS485) */
+    #define WHEEL_SPEED  50   /* 50 RPM (±) */
+    /* 左腿正转, 右腿反转 → 机器人向前运动 */
     osMutexAcquire(mutex_UART1, osWaitForever);
     MOTOR_SendModeSwitchCmd(1, MOTOR_CTRL_SPEED);
+    MOTOR_SendModeSwitchCmd(2, MOTOR_CTRL_SPEED);
     osMutexRelease(mutex_UART1);    osDelay(20);
     osMutexAcquire(mutex_UART1, osWaitForever);
-    debug_wheel_cmd_status = (MOTOR_SetSpeed(1, WHEEL_SPEED) == HAL_OK) ? 1 : 2;
+    debug_wheel_cmd_status   = (MOTOR_SetSpeed(1,  WHEEL_SPEED) == HAL_OK) ? 1 : 2;
+    osMutexRelease(mutex_UART1);
+    osMutexAcquire(mutex_UART1, osWaitForever);
+    debug_right_wheel_status = (MOTOR_SetSpeed(2, -WHEEL_SPEED) == HAL_OK) ? 1 : 2;
     osMutexRelease(mutex_UART1);
 
     /* Step 5: 10Hz循环保持 — 关节电机最小腿高 + 轮毂电机持续转动 */
@@ -411,9 +418,10 @@ void Task_EL05_Motor(void *argument)
             osMutexRelease(mutex_CAN);
             debug_targets[i] = g_action0[i];
         }
-        /* 保持轮毂电机转速 */
+        /* 保持轮毂电机转速: 左腿+50RPM, 右腿-50RPM */
         osMutexAcquire(mutex_UART1, osWaitForever);
-        debug_wheel_cmd_status = (MOTOR_SetSpeed(1, WHEEL_SPEED) == HAL_OK) ? 1 : 2;
+        debug_wheel_cmd_status   = (MOTOR_SetSpeed(1,  WHEEL_SPEED) == HAL_OK) ? 1 : 2;
+        debug_right_wheel_status = (MOTOR_SetSpeed(2, -WHEEL_SPEED) == HAL_OK) ? 1 : 2;
         osMutexRelease(mutex_UART1);
 
         debug_m1_fb_pos   = g_el05_motors[0].feedback.position;

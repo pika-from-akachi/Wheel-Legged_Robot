@@ -18,9 +18,10 @@ This project implements the embedded control system for a wheel-legged robot, de
 
 ### Key Features
 
-- **Real-Time Operating System**: FreeRTOS V10.6.2 with 8 priority-based tasks
+- **Real-Time Operating System**: FreeRTOS V10.6.2 with 7 priority-based tasks
 - **Interrupt-Driven IMU**: ICM-42688-P read by TIM2 hardware interrupt (1 kHz, deterministic timing)
 - **Multi-Motor Support**: EL05 joint motor (CAN extended frame), M0601C wheel motor (RS485)
+- **Dual Wheel Drive**: Left wheel (ID=1) and right wheel (ID=2) with differential speed control
 - **LQR Control Framework**: Linear Quadratic Regulator balancing with gain scheduling
 - **Dual MCU Architecture**: STM32F407 (control) + ESP32-S3 (wireless tuning bridge)
 - **Wireless Tuning App**: Alpine.js + Three.js 3D visualization with real-time parameter adjustment
@@ -42,7 +43,7 @@ This project implements the embedded control system for a wheel-legged robot, de
 | MCU | STM32F407IGHx (UFBGA176 package) |
 | Core | ARM Cortex-M4 @ 168 MHz with FPU |
 | CAN Interface | CAN1 (PD0: CAN_RX, PD1: CAN_TX) |
-| RS485 Interface | USART1 (PB6: TX, PB7: RX) with PE0 direction control |
+| RS485 Interface | USART2 (PD5: RX, PD6: TX) with THVD1410DR (PD3: RE#, PD4: DE) |
 | ESP32 Interface | USART3 (PB10: TX, PB11: RX) @ 921600 baud |
 | UART Interface | USART1 (PB7: RX, PA9: TX) with DMA |
 | SPI Interface | SPI1 (PA5: SCK, PA6: MISO, PA7: MOSI, PA4: CS) for IMU<br>SPI3 (PC10: SCK, PC11: MISO, PC12: MOSI) for NRF24L01 |
@@ -109,15 +110,17 @@ IRQ         ───►   PC7 (optional)
 | Control Modes | MIT, Position (PP/CSP), Velocity, Current |
 | Application | Joint motor for wheel-legged robot |
 
-#### M0601C Motor (UART) - Wheel Motor
+#### M0601C Motor (RS485) - Wheel Motor
 
 | Parameter | Value |
 |-----------|-------|
-| Communication | UART @ 115200 bps, 8N1 |
+| Communication | RS485 (USART2) via THVD1410DR @ 115200 bps, 8N1 |
 | Frame Length | 10 bytes (with CRC-8/MAXIM) |
 | Control Modes | Current, Speed, Position |
 | ID Range | 1-4 |
 | Application | Wheel motor for wheel-legged robot |
+| Left Wheel | ID=1 (forward: +RPM / reverse: -RPM) |
+| Right Wheel | ID=2 (forward: -RPM / reverse: +RPM) |
 
 #### ICM-42688-P 6-Axis IMU Sensor
 
@@ -188,7 +191,7 @@ This project uses **FreeRTOS V10.6.2** with a comprehensive task-based architect
 |------|----------|-----------|----------|-------|-------------|
 | **IMU** | ICM-42688-P | 1kHz | Medium | 1KB | IMU data processing (raw read by TIM2 ISR) |
 | **Remote** | NRF24L01+ | 100Hz | High | 2KB | Remote controller data reading |
-| **EL05 Motor** | EL05 (CAN) | 10Hz | Medium | 2KB | **Single task** sequentially controls 4 joint motors |
+| **EL05 Motor** | EL05 (CAN) + M0601C (RS485) | 10Hz | Medium | 2KB | **Single task**: 4 joint motors (Action Group 0) + both wheel motors (ID=1 forward, ID=2 reverse) |
 | **Monitor** | System Safety | 10Hz | Low | 1KB | System status monitoring |
 | **Debug** | Diagnostics | 1Hz | Lowest | 1KB | Debug output |
 
@@ -437,24 +440,31 @@ Go to zero first (Action Group 0), then rotate to max leg height positions.
 Control sequence: `Configure PP mode → Disable(clear fault) → Enable → Apply Action Group 0 (homing) → Apply Action Group 1 (target) → 10Hz hold loop`
 
 ```c
-// freertos.c — Action Groups 0 & 1
-static const float g_action0[4] = { /* homing */ };
-static const float g_action1[4] = { /* targets */ };
+// freertos.c — Action Group 0 (homing) + dual wheel drive
+static const float g_action0[4] = { /* homing: 0, 6.2832, 6.2832, 0 */ };
 
 void Task_EL05_Motor(void *argument) {
-    /* Step 1-2: Configure & enable all 4 motors */
+    /* Step 1-2: Configure PP mode & enable all 4 joint motors */
     /* Step 3: Apply g_action0[i] → homing (min leg height) */
-    /* Step 4: Apply g_action1[i] → max leg height */
-    /* Step 5: 10Hz loop hold g_action1[i] */
+    /* Step 4: Switch both wheel motors to speed mode */
+    /*         MOTOR_SetSpeed(1, +50)  — left wheel forward */
+    /*         MOTOR_SetSpeed(2, -50)  — right wheel forward (opposite) */
+    /* Step 5: 10Hz loop — hold joint positions + maintain wheel speeds */
 }
 ```
 
 ### M0601C Hub Motors (RS485 Bus)
 
-| Motor ID | Location | RS485 ID | Type |
-|----------|----------|----------|------|
-| M5 | Left Wheel | 1 | M0601C |
-| M6 | Right Wheel | 2 | M0601C |
+| Motor | Location | RS485 ID | Type | Direction |
+|-------|----------|----------|------|-----------|
+| M5 | Left Wheel | 1 | M0601C | +RPM = forward |
+| M6 | Right Wheel | 2 | M0601C | -RPM = forward (opposite) |
+
+**Differential Drive:**
+- Forward: `MOTOR_SetSpeed(1, +50)` / `MOTOR_SetSpeed(2, -50)`
+- Reverse: `MOTOR_SetSpeed(1, -50)` / `MOTOR_SetSpeed(2, +50)`
+- Turn left: `MOTOR_SetSpeed(1, 0)` / `MOTOR_SetSpeed(2, -50)`
+- Turn right: `MOTOR_SetSpeed(1, +50)` / `MOTOR_SetSpeed(2, 0)`
 
 ---
 
@@ -475,11 +485,13 @@ Debug counters available in Keil Watch window:
 ```c
 g_imu_update_count           // Should increase by 1000 per second
 g_remote_update_count        // Should increase by 100 per second
-g_el05_motor_update_count    // Should increase by 100 per second
-g_m0601c_motor_update_count  // Should increase by 100 per second
+g_el05_motor_update_count    // Should increase by 10 per second
 g_can_tx_count               // CAN TX message count
 g_can_rx_count               // CAN RX message count
 g_system_status              // 0 = all systems normal
+debug_wheel_cmd_status       // Left wheel (ID=1) cmd: 1=OK, 2=fail
+debug_right_wheel_status     // Right wheel (ID=2) cmd: 1=OK, 2=fail
+dr0                          // RS485 feedback frame DATA[0] = motor ID
 ```
 
 For detailed FreeRTOS configuration, see [FREERTOS_CONFIG.md](FREERTOS_CONFIG.md).
@@ -897,11 +909,12 @@ This project is developed for educational purposes as part of the 2026 Mingyue C
 
 - **实时操作系统**：FreeRTOS V10.6.2，7个优先级任务
 - **中断驱动IMU**：ICM-42688-P由TIM2硬件中断读取（1kHz，确定性时序）
-- **多电机支持**：EL05关节电机（CAN扩展帧）、M0601C轮毂电机（UART）
+- **多电机支持**：EL05关节电机（CAN扩展帧）、M0601C轮毂电机（RS485）
+- **双轮差速驱动**：左轮(ID=1)正转前进，右轮(ID=2)反转前进
 - **IMU传感器**：ICM-42688-P六轴IMU，带卡尔曼滤波（SPI1）
 - **无线控制**：NRF24L01+遥控器，支持对码协议（SPI3）
 - **多种控制模式**：MIT模式、位置控制、速度控制、电流控制
-- **实时通信**：CAN 2.0 @ 1Mbps，UART @ 115200bps（DMA模式）
+- **实时通信**：CAN 2.0 @ 1Mbps，RS485 @ 115200bps，UART @ 921600bps
 - **任务同步**：消息队列、互斥量、信号量
 - **STM32 HAL框架**：基于STM32CubeMX生成的代码
 - **模块化架构**：独立驱动模块，易于集成
@@ -917,7 +930,9 @@ This project is developed for educational purposes as part of the 2026 Mingyue C
 | MCU | STM32F407IGHx (UFBGA176封装) |
 | 内核 | ARM Cortex-M4 @ 168 MHz，带FPU |
 | CAN接口 | CAN1 (PD0: CAN_RX, PD1: CAN_TX) |
+| RS485接口 | USART2 (PD5: RX, PD6: TX) via THVD1410DR (PD3: RE#, PD4: DE) |
 | UART接口 | USART1 (PB7: RX, PA9: TX)，带DMA |
+| ESP32接口 | USART3 (PB10: TX, PB11: RX) @ 921600 baud |
 | SPI接口 | SPI1 (PA5: SCK, PA6: MISO, PA7: MOSI, PA4: CS) 用于IMU<br>SPI3 (PC10: SCK, PC11: MISO, PC12: MOSI) 用于NRF24L01 |
 | 调试接口 | SWD (PA13: SWDIO, PA14: SWCLK) |
 | 外部晶振 | 8 MHz HSE |
@@ -970,15 +985,17 @@ IRQ         ───►   PC7 (可选)
 | 控制模式 | MIT、位置(PP/CSP)、速度、电流 |
 | 应用场景 | 轮足机器人关节电机 |
 
-#### M0601C 电机（UART）- 轮毂电机
+#### M0601C 电机（RS485）- 轮毂电机
 
 | 参数 | 数值 |
 |------|------|
-| 通信方式 | UART @ 115200 bps, 8N1 |
+| 通信方式 | RS485 (USART2) via THVD1410DR @ 115200 bps, 8N1 |
 | 帧长度 | 10字节（含CRC-8/MAXIM校验） |
 | 控制模式 | 电流环、速度环、位置环 |
 | ID范围 | 1-4 |
 | 应用场景 | 轮足机器人轮毂电机 |
+| 左轮毂 | ID=1（正转前进，反转后退） |
+| 右轮毂 | ID=2（反转前进，正转后退） |
 
 #### ICM-42688-P 六轴IMU传感器
 
@@ -1045,7 +1062,7 @@ int main(void) {
 |------|------|------|--------|--------|------|
 | **IMU** | ICM-42688-P | 1kHz | 中 | 1KB | IMU数据处理（原始读取由TIM2 ISR完成） |
 | **Remote** | NRF24L01+ | 100Hz | 高 | 2KB | 遥控器数据读取 |
-| **EL05 Motor** | EL05 (CAN) | 10Hz | 中 | 2KB | **单任务**顺序控制4个关节电机 |
+| **EL05 Motor** | EL05 (CAN) + M0601C (RS485) | 10Hz | 中 | 2KB | **单任务**: 4个关节电机(动作组0) + 左右轮毂电机(ID=1正转, ID=2反转) |
 | **Monitor** | 系统安全 | 10Hz | 低 | 1KB | 系统状态监控 |
 | **Debug** | 诊断输出 | 1Hz | 最低 | 1KB | 调试输出 |
 
@@ -1108,11 +1125,13 @@ Keil Watch窗口可用的调试计数器：
 ```c
 g_imu_update_count           // 应每秒增加1000
 g_remote_update_count        // 应每秒增加100
-g_el05_motor_update_count    // 应每秒增加100
-g_m0601c_motor_update_count  // 应每秒增加100
+g_el05_motor_update_count    // 应每秒增加10
 g_can_tx_count               // CAN发送计数
 g_can_rx_count               // CAN接收计数
 g_system_status              // 0 = 所有系统正常
+debug_wheel_cmd_status       // 左轮(ID=1)指令状态: 1=成功, 2=失败
+debug_right_wheel_status     // 右轮(ID=2)指令状态: 1=成功, 2=失败
+dr0                          // RS485反馈帧DATA[0] = 电机ID
 ```
 
 详细FreeRTOS配置请参见 [FREERTOS_CONFIG.md](FREERTOS_CONFIG.md)。
@@ -1207,15 +1226,16 @@ static const float g_action0[4] = {
 控制顺序：`配置PP模式 → Disable清故障 → Enable → 动作组0(归零) → 动作组1(目标) → 10Hz保持循环`
 
 ```c
-// freertos.c — 动作组0(归零) + 动作组1(目标) 分离定义
-static const float g_action0[4] = { /* 归零位置 */ };
-static const float g_action1[4] = { /* 目标位置 */ };
+// freertos.c — 动作组0(归零) + 双轮毂驱动
+static const float g_action0[4] = { /* 归零: 0, 6.2832, 6.2832, 0 */ };
 
 void Task_EL05_Motor(void *argument) {
-    /* Step 1-2: 配置 & 使能4电机 */
-    /* Step 3: g_action0[i] → 最小腿高 */
-    /* Step 4: g_action1[i] → 最大腿高 */
-    /* Step 5: 10Hz保持 g_action1[i] */
+    /* Step 1-2: 配置PP模式 & 使能4个关节电机 */
+    /* Step 3: g_action0[i] → 最小腿高(归零) */
+    /* Step 4: 左右轮毂切速度模式 */
+    /*         MOTOR_SetSpeed(1, +50)  — 左轮正转(前进) */
+    /*         MOTOR_SetSpeed(2, -50)  — 右轮反转(前进) */
+    /* Step 5: 10Hz循环 — 保持关节位置 + 维持轮毂转速 */
 }
 ```
 

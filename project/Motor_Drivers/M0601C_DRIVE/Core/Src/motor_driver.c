@@ -242,7 +242,7 @@ HAL_StatusTypeDef MOTOR_SendSetIDCmd(uint8_t newId)
     txBuf[0] = 0xAAU;
     txBuf[1] = 0x55U;
     txBuf[2] = 0x53U;
-    txBuf[3] = newId;               /* 目标 ID */
+    txBuf[3] = newId;
     txBuf[4] = 0x00U;
     txBuf[5] = 0x00U;
     txBuf[6] = 0x00U;
@@ -250,14 +250,21 @@ HAL_StatusTypeDef MOTOR_SendSetIDCmd(uint8_t newId)
     txBuf[8] = 0x00U;
     txBuf[9] = 0x00U;
 
-    /* 数据手册要求连续发送 5 次 */
+    /* 保持TX连续发5帧, 避免方向切换丢帧 */
+    RS485_TX_Mode();
+    for (volatile int d = 0; d < 100; d++);
+
     for (uint8_t i = 0U; i < MOTOR_SET_ID_REPEAT_CNT; i++) {
-        status = MOTOR_UART_Tx(txBuf);
-        if (status != HAL_OK) {
-            break;
+        __HAL_UART_CLEAR_FLAG(&huart2, UART_FLAG_TC);
+        status = HAL_UART_Transmit(&huart2, txBuf, MOTOR_FRAME_LEN, 100U);
+        if (status != HAL_OK) break;
+        uint32_t tick = HAL_GetTick();
+        while (!__HAL_UART_GET_FLAG(&huart2, UART_FLAG_TC)) {
+            if (HAL_GetTick() - tick > 10) break;
         }
-        HAL_Delay(5U); /* 每帧间隔 5ms，防止总线拥挤 */
+        for (volatile int d = 0; d < 5000; d++);
     }
+    RS485_RX_Mode();
 
     return status;
 }
@@ -291,13 +298,14 @@ HAL_StatusTypeDef MOTOR_Stop(uint8_t motorId)
 }
 
 /**
- * @brief  启动 DMA 接收电机反馈数据
+ * @brief  启动中断接收电机反馈数据
  * @retval HAL_StatusTypeDef
+ * @note   改用 IT 模式 (非 DMA), 与 M0602C 例程一致
  */
 HAL_StatusTypeDef MOTOR_StartReceive(void)
 {
     RS485_RX_Mode();  /* 确保在接收模式 */
-    return HAL_UART_Receive_DMA(&huart2, s_rxBuf, MOTOR_FRAME_LEN);
+    return HAL_UART_Receive_IT(&huart2, s_rxBuf, MOTOR_FRAME_LEN);
 }
 
 /**
@@ -370,8 +378,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
             g_debug.crcError++;
         }
 
-        /* 重新启动接收 */
-        HAL_UART_Receive_DMA(&huart2, s_rxBuf, MOTOR_FRAME_LEN);
+        /* 重新启动接收 (IT模式) */
+        HAL_UART_Receive_IT(&huart2, s_rxBuf, MOTOR_FRAME_LEN);
     }
 }
 
