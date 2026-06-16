@@ -84,16 +84,13 @@ void ROBOT_GetBalanceGains(float K[2][4], RobotMode_e mode)
 {
     switch (mode) {
     case ROBOT_MODE_STANDING:
-        /* Stiff balancing — prioritize body angle */
-        /* K = dlqr(A, B, diag(100, 10, 1, 1), diag(0.1, 0.5)) */
-        K[0][0] = -31.62f;  /* Joint: body angle gain */
-        K[0][1] = -7.75f;   /* Joint: body rate gain */
-        K[0][2] = -3.16f;   /* Joint: wheel position gain */
-        K[0][3] = -2.24f;   /* Joint: wheel velocity gain */
-        K[1][0] = 7.07f;    /* Wheel: body angle gain */
-        K[1][1] = 3.54f;    /* Wheel: body rate gain */
-        K[1][2] = 2.24f;    /* Wheel: wheel position gain */
-        K[1][3] = 4.47f;    /* Wheel: wheel velocity gain */
+        /* Speed mode PD: Kp=8, Kd=10 */
+        K[0][0] = 0.0f;     K[0][1] = 0.0f;
+        K[0][2] = 0.0f;     K[0][3] = 0.0f;
+        K[1][0] = -8.00f;   /* body angle */
+        K[1][1] = -5.00f;   /* body rate */
+        K[1][2] = 0.0f;     /* wheel pos */
+        K[1][3] = 0.0f;     /* wheel vel */
         break;
 
     case ROBOT_MODE_DRIVING:

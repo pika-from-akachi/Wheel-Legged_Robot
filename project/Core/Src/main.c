@@ -31,8 +31,8 @@
 #include "el05_motor.h"
 #include "motor_driver.h"
 //#include "m0601c_motor.h"   // disabled — not in build
-//#include "lqr_control.h"
-//#include "robot_model.h"
+#include "lqr_control.h"
+#include "robot_model.h"
 //#include "esp32_com.h"      // disabled — not in build
 /* USER CODE END Includes */
 
@@ -239,6 +239,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   /* Initialize all motor drivers and communication peripherals */
 
+
   /* ===== EL05 Joint Motors (CAN, IDs 1-4) ===== */
   EL05_Init(&hcan1);
 
@@ -266,19 +267,16 @@ int main(void)
   //ESP32_COM_Init(&huart3);
   //ESP32_COM_StartRx();
 
-  // ===== Robot Model & LQR disabled for motor test =====
-  //ROBOT_Init();
-  //LQR_Init(&g_lqr_controller);
-  //LQR_SetDefaultTuning(&g_lqr_tuning);
-  //LQR_ComputeGains(&g_lqr_tuning, &g_lqr_controller.gain);
-  //LQR_SetMode(&g_lqr_controller, ROBOT_MODE_STANDING);
+  // ===== LQR init =====
+  extern LQR_Controller_t g_lqr_controller;
+  extern LQR_TuningParams_t g_lqr_tuning;
+  ROBOT_Init();
+  LQR_Init(&g_lqr_controller);
+  LQR_SetDefaultTuning(&g_lqr_tuning);
+  LQR_ComputeGains(&g_lqr_tuning, &g_lqr_controller.gain);
+  LQR_SetMode(&g_lqr_controller, ROBOT_MODE_STANDING);
 
   /* USER CODE END 2 */
-
-  /* ===== 轮毂电机 ID=1 驱动测试 (跟Task_EL05_Motor一致) ===== */
-  MOTOR_SendModeSwitchCmd(1, MOTOR_CTRL_SPEED);
-  HAL_Delay(20);
-  MOTOR_SetSpeed(1, 50);
 
   /* Init scheduler */
   osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */

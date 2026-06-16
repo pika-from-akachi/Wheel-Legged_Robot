@@ -142,6 +142,15 @@ HAL_StatusTypeDef MOTOR_SendSetIDCmd(uint8_t newId);
 HAL_StatusTypeDef MOTOR_SetSpeed(uint8_t motorId, int16_t rpm);
 
 /**
+ * @brief  电流环控制
+ * @param  motorId : 电机 ID 号，范围 1~4
+ * @param  current_raw : 电流给定值，-32767~32767 对应 -8A~8A
+ * @retval HAL_StatusTypeDef
+ * @note   需先切换电流模式 MOTOR_SendModeSwitchCmd(id, MOTOR_CTRL_CURRENT)
+ */
+HAL_StatusTypeDef MOTOR_SetCurrent(uint8_t motorId, int16_t current_raw);
+
+/**
  * @brief  封装函数：电机刹车（速度环下有效）
  * @param  motorId : 电机 ID 号，范围 1~4
  * @retval HAL_StatusTypeDef

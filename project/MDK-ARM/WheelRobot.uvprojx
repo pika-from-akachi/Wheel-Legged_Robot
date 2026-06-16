@@ -597,6 +597,16 @@
                 </FileArmAds>
               </FileOption>
             </File>
+            <File>
+              <FileName>lqr_control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/lqr_control.c</FilePath>
+            </File>
+            <File>
+              <FileName>robot_model.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/robot_model.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
