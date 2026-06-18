@@ -103,7 +103,7 @@ typedef struct {
 #define LQR_DEFAULT_Q_WHEEL_VEL      1.0f
 #define LQR_DEFAULT_R_JOINT_TORQUE   0.1f
 #define LQR_DEFAULT_R_WHEEL_TORQUE   0.5f
-#define LQR_DEFAULT_KI               0.5f
+#define LQR_DEFAULT_KI               0.02f
 #define LQR_DEFAULT_MAX_JOINT_TORQUE 6.0f
 #define LQR_DEFAULT_MAX_WHEEL_TORQUE 3.0f
 #define LQR_DEFAULT_MAX_INTEGRAL     2.0f

@@ -102,10 +102,24 @@ LQR_TuningParams_t g_lqr_tuning;
 RobotState_t g_robot_state;
 volatile uint8_t g_balance_enabled = 0;
 volatile float g_accel_offset = 0.0f;
+volatile float g_gyro_bias = 0.0f;   /* 陀螺仪零偏(rad/s) */
 volatile float debug_lqr_body_angle = 0.0f;
+
+/* ===== 数据日志缓冲区 (2500条, 每5次控制循环写一条) ===== */
+#define LOG_SIZE 2500
+#define LOG_DECIMATE 5
+typedef struct {
+    uint32_t tick;
+    float    ay; float az; float gx;
+    float    angle; float rate;
+    float    torque;
+} LogEntry_t;
+volatile LogEntry_t g_log[LOG_SIZE];
+volatile uint32_t g_log_idx = 0;
 volatile float debug_lqr_wheel_torque = 0.0f;
 volatile float debug_lqr_current_raw = 0.0f;
 volatile uint8_t debug_lqr_enabled = 0;
+volatile int16_t g_motor_test_cur = 0;   /* 非0时覆盖LQR输出,直接设电流 */
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -414,18 +428,20 @@ void Task_EL05_Motor(void *argument)
     osMutexRelease(mutex_UART1);
     osDelay(20);
 
-    /* IMU零点校准: 等500ms后读50次平均 */
+    /* IMU零点校准: 等500ms后读50次平均 (accel offset + gyro bias) */
     {
         osDelay(500);
-        float sum = 0.0f;
+        float sum_a = 0.0f, sum_g = 0.0f;
         for (int i = 0; i < 50; i++) {
             ICM42688_RawData_t r = IMU_GetLatestRawData();
             float ay = (float)r.accel_y * 0.488f / 1000.0f;
             float az = (float)r.accel_z * 0.488f / 1000.0f;
-            sum += atan2f(ay, az);
+            sum_a += atan2f(ay, az);
+            sum_g += (float)r.gyro_x / 16.4f;  /* raw dps */
             osDelay(2);
         }
-        g_accel_offset = sum / 50.0f;
+        g_accel_offset = sum_a / 50.0f;
+        g_gyro_bias = (sum_g / 50.0f) * 0.017453f;  /* 平均零偏 → rad/s */
     }
 
     LQR_Enable(&g_lqr_controller);
@@ -706,11 +722,10 @@ void Task_IMU(void *argument)
 
 /**
   * @brief Balance control task
-  * @note  IMU is mounted UPSIDE DOWN (flipped 180deg around Y axis)
-  *        Y forward unchanged, Z points down, X points left.
-  *        Complementary filter: 98% gyro + 2% accel (handles linear accel at wheel axle)
-  *        Speed mode: Kp=8, Kd=10, max 200RPM
-  *        Mapping: LEFT=+speed(forward), RIGHT=-speed(forward mirror)
+  * @note  IMU mounting: Y forward, X right, Z up (标准安装)
+  *        前倾时: body_angle>0, u[1]=-Kx → K[1][0]<0为正确负反馈
+  *        Complementary filter: 95% gyro + 5% accel
+  *        Mapping: LEFT=+cur(forward), RIGHT=-cur(forward mirror)
   */
 void Task_Balance(void *argument)
 {
@@ -733,6 +748,12 @@ void Task_Balance(void *argument)
     osMutexRelease(mutex_UART1);
     osDelay(50);
 
+    /* 实测: 三姿态验证过, g_accel_offset=0 */
+    g_accel_offset = 0.0f;
+
+    /* 陀螺零偏设为0(互补滤波自动收敛,防标定期间运动干扰) */
+    g_gyro_bias = 0.0f;
+
     tick_start = osKernelGetTickCount();
 
     for (;;) {
@@ -740,25 +761,28 @@ void Task_Balance(void *argument)
         ICM42688_RawData_t raw = IMU_GetLatestRawData();
         float ax = (float)raw.accel_y * 0.488f / 1000.0f;
         float az = (float)raw.accel_z * 0.488f / 1000.0f;
-        float gx = (float)raw.gyro_x * 16.4f;
+        float gx = (float)raw.gyro_x / 16.4f;
 
-        /* IMU upside-down correction:
-         *   atan2(y,z) gives π-θ, subtract offset π → -θ, negate → θ */
+        /* Z朝上IMU: atan2(ay,az)直立=π, 前倾=π-θ, 后倾=-π+θ.
+         *   body_angle_raw = -(diff): 前倾>0, 后倾<0 */
         float accel_angle = atan2f(ax, az);
-        float body_angle_raw = -(accel_angle - g_accel_offset);
+        float angle_diff = accel_angle - g_accel_offset;
+        if (angle_diff > 3.14159f) angle_diff -= 2.0f * 3.14159f;
+        else if (angle_diff < -3.14159f) angle_diff += 2.0f * 3.14159f;
+        float body_angle_raw = -angle_diff;
 
-        /* Gyro: upside-down flips gyro_X sign, so NO negation */
-        float gyro_rate = gx * 0.017453f;
+        /* Gyro: rad/s, 减零偏. Z朝上:前倾gyro_x<0,取反使与body_angle同号 */
+        float gyro_rate = -(gx * 0.017453f - g_gyro_bias);
 
-        /* Complementary filter: 98% gyro + 2% accel */
+        /* Complementary filter: 90% gyro + 10% accel */
         static float cf_angle = 0.0f;
         static uint32_t last_t = 0;
         uint32_t now_t = osKernelGetTickCount();
         float dt = (now_t - last_t) * 0.001f;
-        if (dt > 0.05f) { cf_angle = body_angle_raw; }
-        else if (dt > 0.001f) {
-            cf_angle = 0.95f * (cf_angle + gyro_rate * dt) + 0.05f * body_angle_raw;
+        if (dt > 0.001f && dt < 0.05f) {
+            cf_angle = 0.90f * (cf_angle + gyro_rate * dt) + 0.10f * body_angle_raw;
         }
+        /* 首次dt很大: 保持cf_angle初始值(0),不重置到body_angle_raw(运动污染) */
         last_t = now_t;
 
         /* Gyro LPF for D term */
@@ -768,7 +792,7 @@ void Task_Balance(void *argument)
 
         /* LQR state */
         balance_state.body_angle = cf_angle;
-        balance_state.body_rate = g_lpf;
+        balance_state.body_rate = gyro_rate;  /* 原始角速度, 零滞后 */
         balance_state.wheel_position = 0.0f;
         balance_state.wheel_velocity = 0.0f;
         LQR_Update(&g_lqr_controller, &balance_state, dt);
@@ -779,10 +803,25 @@ void Task_Balance(void *argument)
         int16_t cur = (int16_t)(torque * 27306.0f);
         if (cur > 32767) cur = 32767; if (cur < -32767) cur = -32767;
 
+        /* 电机方向测试: g_motor_test_cur非0时覆盖输出 */
+        if (g_motor_test_cur != 0) {
+            cur = g_motor_test_cur;
+        }
+
         osMutexAcquire(mutex_UART1, osWaitForever);
         MOTOR_SetCurrent(WHEEL_ID_LEFT, cur);
         MOTOR_SetCurrent(WHEEL_ID_RIGHT, -cur);
         osMutexRelease(mutex_UART1);
+
+        /* Log */
+        { static uint32_t log_cnt = 0;
+          if (++log_cnt % LOG_DECIMATE == 0) {
+            uint32_t li = g_log_idx++ % LOG_SIZE;
+            g_log[li].tick  = uwTick;
+            g_log[li].ay    = ax; g_log[li].az = az; g_log[li].gx = gx;
+            g_log[li].angle = cf_angle; g_log[li].rate = g_lpf;
+            g_log[li].torque= torque;
+        } }
 
         /* Debug */
         debug_lqr_body_angle = cf_angle;

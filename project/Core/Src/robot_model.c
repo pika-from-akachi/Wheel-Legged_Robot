@@ -84,11 +84,10 @@ void ROBOT_GetBalanceGains(float K[2][4], RobotMode_e mode)
 {
     switch (mode) {
     case ROBOT_MODE_STANDING:
-        /* Speed mode PD: Kp=8, Kd=10 */
         K[0][0] = 0.0f;     K[0][1] = 0.0f;
         K[0][2] = 0.0f;     K[0][3] = 0.0f;
-        K[1][0] = -8.00f;   /* body angle */
-        K[1][1] = -5.00f;   /* body rate */
+        K[1][0] = -0.5f;    /* body angle (P) */
+        K[1][1] = -0.2f;    /* body rate (D) */
         K[1][2] = 0.0f;     /* wheel pos */
         K[1][3] = 0.0f;     /* wheel vel */
         break;
