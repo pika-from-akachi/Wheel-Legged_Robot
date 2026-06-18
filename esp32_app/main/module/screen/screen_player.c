@@ -36,6 +36,7 @@
 
 #define ST77916_QSPI_WRITE 0x32
 #define ST77916_SPI_MAX_TRANSFER_BYTES (SCREEN_PLAYER_WIDTH * 80 * 2)
+#define SCREEN_FILL_ROWS 20
 
 #define SCREEN_VIDEO_MAGIC 0x314A5657u /* WVJ1 */
 #define SCREEN_VIDEO_HEADER_SIZE 32u
@@ -78,6 +79,44 @@ static uint8_t *s_tjpg_work;
 static TaskHandle_t s_player_task;
 static char s_boot_path[64];
 static char s_loop_path[64];
+
+static esp_err_t mount_spiffs_if_needed(void);
+
+static esp_err_t ensure_video_resources(void)
+{
+    esp_err_t ret = mount_spiffs_if_needed();
+    if (ret != ESP_OK) {
+        s_status.last_error = "spiffs_mount_failed";
+        return ret;
+    }
+
+    if (s_framebuffer == NULL) {
+        s_framebuffer = heap_caps_malloc(SCREEN_PLAYER_WIDTH * SCREEN_PLAYER_HEIGHT * 2U,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_framebuffer == NULL) {
+            s_framebuffer = heap_caps_malloc(SCREEN_PLAYER_WIDTH * SCREEN_PLAYER_HEIGHT * 2U,
+                                             MALLOC_CAP_8BIT);
+        }
+    }
+    if (s_tjpg_work == NULL) {
+        s_tjpg_work = heap_caps_malloc(SCREEN_VIDEO_TJPG_WORK_BYTES, MALLOC_CAP_8BIT);
+    }
+    if (s_jpeg_buffer == NULL) {
+        s_jpeg_buffer = heap_caps_malloc(SCREEN_VIDEO_MAX_JPEG_BYTES,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_jpeg_buffer == NULL) {
+            s_jpeg_buffer = heap_caps_malloc(SCREEN_VIDEO_MAX_JPEG_BYTES,
+                                             MALLOC_CAP_8BIT);
+        }
+    }
+
+    if (s_framebuffer == NULL || s_jpeg_buffer == NULL || s_tjpg_work == NULL) {
+        s_status.last_error = "no_memory";
+        return ESP_ERR_NO_MEM;
+    }
+
+    return ESP_OK;
+}
 
 static uint16_t read_le16(const uint8_t *p)
 {
@@ -251,7 +290,7 @@ static esp_err_t lcd_init_backlight(void)
         .intr_type = GPIO_INTR_DISABLE,
     };
     ESP_RETURN_ON_ERROR(gpio_config(&io_conf), TAG, "backlight gpio config failed");
-    return lcd_backlight_set(false);
+    return lcd_backlight_set(true);
 }
 
 static esp_err_t lcd_init_panel(void)
@@ -304,6 +343,46 @@ esp_err_t screen_player_draw_rgb565_rect(int x, int y, int width, int height, co
 
     ESP_RETURN_ON_ERROR(lcd_set_window(x, y, width, height), TAG, "set draw window failed");
     return lcd_qspi_write(ST77916_CMD_RAMWR, rgb565, len);
+}
+
+esp_err_t screen_player_fill_rgb565(uint16_t rgb565)
+{
+    if (!s_status.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const int rows_per_chunk = SCREEN_FILL_ROWS;
+    const size_t chunk_bytes = SCREEN_PLAYER_WIDTH * rows_per_chunk * 2U;
+    uint8_t *chunk = heap_caps_malloc(chunk_bytes, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    if (chunk == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    const uint8_t hi = (uint8_t)(rgb565 >> 8);
+    const uint8_t lo = (uint8_t)rgb565;
+    for (size_t i = 0; i < chunk_bytes; i += 2) {
+        chunk[i] = hi;
+        chunk[i + 1] = lo;
+    }
+
+    esp_err_t ret = ESP_OK;
+    for (int y = 0; y < SCREEN_PLAYER_HEIGHT; y += rows_per_chunk) {
+        const int rows = (SCREEN_PLAYER_HEIGHT - y) < rows_per_chunk
+                             ? (SCREEN_PLAYER_HEIGHT - y)
+                             : rows_per_chunk;
+        ret = screen_player_draw_rgb565_rect(0,
+                                             y,
+                                             SCREEN_PLAYER_WIDTH,
+                                             rows,
+                                             chunk,
+                                             SCREEN_PLAYER_WIDTH * rows * 2U);
+        if (ret != ESP_OK) {
+            break;
+        }
+    }
+
+    free(chunk);
+    return ret;
 }
 
 static UINT jpeg_input_func(JDEC *jd, BYTE *buff, UINT nbyte)
@@ -543,26 +622,6 @@ esp_err_t screen_player_init(const screen_player_config_t *config)
         return ESP_OK;
     }
 
-    ESP_RETURN_ON_ERROR(mount_spiffs_if_needed(), TAG, "SPIFFS mount failed");
-
-    s_framebuffer = heap_caps_malloc(SCREEN_PLAYER_WIDTH * SCREEN_PLAYER_HEIGHT * 2U,
-                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (s_framebuffer == NULL) {
-        s_framebuffer = heap_caps_malloc(SCREEN_PLAYER_WIDTH * SCREEN_PLAYER_HEIGHT * 2U,
-                                         MALLOC_CAP_8BIT);
-    }
-    s_tjpg_work = heap_caps_malloc(SCREEN_VIDEO_TJPG_WORK_BYTES, MALLOC_CAP_8BIT);
-    s_jpeg_buffer = heap_caps_malloc(SCREEN_VIDEO_MAX_JPEG_BYTES,
-                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (s_jpeg_buffer == NULL) {
-        s_jpeg_buffer = heap_caps_malloc(SCREEN_VIDEO_MAX_JPEG_BYTES,
-                                         MALLOC_CAP_8BIT);
-    }
-    if (s_framebuffer == NULL || s_jpeg_buffer == NULL || s_tjpg_work == NULL) {
-        s_status.last_error = "no_memory";
-        return ESP_ERR_NO_MEM;
-    }
-
     spi_bus_config_t bus_cfg = {
         .data0_io_num = config->data0_gpio,
         .data1_io_num = config->data1_gpio,
@@ -613,6 +672,8 @@ esp_err_t screen_player_start_sequence(const char *boot_path, const char *loop_p
     if (s_player_task != NULL) {
         return ESP_OK;
     }
+
+    ESP_RETURN_ON_ERROR(ensure_video_resources(), TAG, "video resources init failed");
 
     strlcpy(s_boot_path, boot_path, sizeof(s_boot_path));
     strlcpy(s_loop_path, loop_path, sizeof(s_loop_path));

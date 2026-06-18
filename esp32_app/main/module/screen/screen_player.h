@@ -32,6 +32,7 @@ typedef struct {
 esp_err_t screen_player_init(const screen_player_config_t *config);
 esp_err_t screen_player_start_sequence(const char *boot_path, const char *loop_path);
 esp_err_t screen_player_draw_rgb565_rect(int x, int y, int width, int height, const void *rgb565, size_t len);
+esp_err_t screen_player_fill_rgb565(uint16_t rgb565);
 esp_err_t screen_player_status(screen_player_status_t *out);
 
 #ifdef __cplusplus

@@ -1,10 +1,13 @@
 #include "screen_ui.h"
 
+#include "esp_log.h"
+
 #include "screen_player.h"
 
 #define SCREEN_BOOT_VIDEO_PATH "/www/video/boot.wvj"
 #define SCREEN_LOOP_VIDEO_PATH "/www/video/loop.wvj"
 
+static const char *TAG = "SCREEN_UI";
 static screen_ui_status_t s_status;
 static screen_ui_config_t s_config;
 
@@ -60,13 +63,14 @@ esp_err_t screen_ui_init(const screen_ui_config_t *config)
         return ret;
     }
 
-    ret = screen_player_start_sequence(SCREEN_BOOT_VIDEO_PATH, SCREEN_LOOP_VIDEO_PATH);
+    ret = screen_player_fill_rgb565(0xFFFF);
     update_player_status();
     if (ret != ESP_OK) {
-        s_status.last_error = "screen_player_start_failed";
+        s_status.last_error = "screen_white_fill_failed";
         return ret;
     }
 
+    ESP_LOGI(TAG, "Screen white-fill test active; video playback is bypassed");
     return ESP_OK;
 }
 

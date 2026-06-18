@@ -23,7 +23,7 @@ wheel_bsp_uart_config_t wheel_bsp_stm32_uart_config(void)
 wheel_bsp_pwm_output_config_t wheel_bsp_fan_pwm_config(void)
 {
     return (wheel_bsp_pwm_output_config_t) {
-        .enabled = false,
+        .enabled = true,
         .gpio = 39,
         .ledc_timer = LEDC_TIMER_0,
         .ledc_channel = LEDC_CHANNEL_0,
@@ -37,12 +37,12 @@ wheel_bsp_pwm_output_config_t wheel_bsp_light_pwm_config(void)
 {
     return (wheel_bsp_pwm_output_config_t) {
         .enabled = true,
-        .gpio = GPIO_NUM_4,
+        .gpio = 40,
         .ledc_timer = LEDC_TIMER_1,
         .ledc_channel = LEDC_CHANNEL_1,
         .pwm_frequency_hz = 1000,
         .duty_resolution_bits = LEDC_TIMER_10_BIT,
-        .initial_duty_percent = 0,
+        .initial_duty_percent = 50,
     };
 }
 

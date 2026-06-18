@@ -9,14 +9,44 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "driver/gpio.h"
 
 #include "web_server.h"
+#include "wheel_bsp.h"
 #include "wheel_app.h"
 
 static const char *TAG = "WHEEL_MAIN";
 
+static void force_screen_backlight_on(void)
+{
+    wheel_bsp_screen_config_t screen = wheel_bsp_screen_config();
+    if (screen.backlight_gpio < 0) {
+        return;
+    }
+
+    gpio_config_t io_conf = {
+        .pin_bit_mask = 1ULL << screen.backlight_gpio,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t ret = gpio_config(&io_conf);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "screen backlight gpio config failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    gpio_set_level(screen.backlight_gpio, screen.backlight_active_high ? 1 : 0);
+    ESP_LOGI(TAG, "screen backlight forced on: gpio=%d active_%s",
+             screen.backlight_gpio,
+             screen.backlight_active_high ? "high" : "low");
+}
+
 void app_main(void)
 {
+    force_screen_backlight_on();
+
     ESP_LOGI(TAG, "Wheel-Legged Robot ESP32-S3 auxiliary runtime v1.0");
 
     esp_err_t ret = nvs_flash_init();
