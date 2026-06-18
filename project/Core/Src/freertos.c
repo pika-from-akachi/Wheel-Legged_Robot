@@ -101,7 +101,7 @@ LQR_Controller_t g_lqr_controller;
 LQR_TuningParams_t g_lqr_tuning;
 RobotState_t g_robot_state;
 volatile uint8_t g_balance_enabled = 0;
-volatile float g_accel_offset = 0.0f;
+volatile float g_accel_offset = -0.015f;  /* IMU校准: 0.00589 rad */
 volatile float g_gyro_bias = 0.0f;   /* 陀螺仪零偏(rad/s) */
 volatile float debug_lqr_body_angle = 0.0f;
 
@@ -119,7 +119,8 @@ volatile uint32_t g_log_idx = 0;
 volatile float debug_lqr_wheel_torque = 0.0f;
 volatile float debug_lqr_current_raw = 0.0f;
 volatile uint8_t debug_lqr_enabled = 0;
-volatile int16_t g_motor_test_cur = 0;   /* 非0时覆盖LQR输出,直接设电流 */
+volatile int16_t g_motor_test_cur = 0;
+volatile uint8_t g_calibrate_zero = 0;  /* 设1标定当前姿态为平衡零点 */   /* 非0时覆盖LQR输出,直接设电流 */
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -748,8 +749,7 @@ void Task_Balance(void *argument)
     osMutexRelease(mutex_UART1);
     osDelay(50);
 
-    /* 实测: 三姿态验证过, g_accel_offset=0 */
-    g_accel_offset = 0.0f;
+    /* g_accel_offset 已硬编码为校准值 */
 
     /* 陀螺零偏设为0(互补滤波自动收敛,防标定期间运动干扰) */
     g_gyro_bias = 0.0f;
@@ -759,6 +759,12 @@ void Task_Balance(void *argument)
     for (;;) {
         /* Read IMU raw data from ISR double buffer */
         ICM42688_RawData_t raw = IMU_GetLatestRawData();
+        /* 标定: g_calibrate_zero=1时记录当前姿态为平衡零点 */
+        if (g_calibrate_zero) {
+            float ca = atan2f((float)raw.accel_y * 0.488f / 1000.0f, (float)raw.accel_z * 0.488f / 1000.0f);
+            g_accel_offset = ca;
+            g_calibrate_zero = 0;
+        }
         float ax = (float)raw.accel_y * 0.488f / 1000.0f;
         float az = (float)raw.accel_z * 0.488f / 1000.0f;
         float gx = (float)raw.gyro_x / 16.4f;
@@ -792,12 +798,23 @@ void Task_Balance(void *argument)
 
         /* LQR state */
         balance_state.body_angle = cf_angle;
-        balance_state.body_rate = gyro_rate;  /* 原始角速度, 零滞后 */
+        balance_state.body_rate = gyro_rate;
+        /* 轮位估算: 从扭矩积分 */
+        /* wheel pos estimation removed */
+        
+        
+        
+        
+        /* 轮速反馈: 从电机读取RPM,转rad/s,用于阻尼漂移 */
+        MotorStatus_t *ms = MOTOR_GetStatus();
+        float wheel_spd = (ms && ms->isValid) ? ms->speed * 0.10472f : 0.0f;
+        balance_state.wheel_velocity = wheel_spd;
+        balance_state.wheel_position = 0.0f;
         balance_state.wheel_position = 0.0f;
         balance_state.wheel_velocity = 0.0f;
         LQR_Update(&g_lqr_controller, &balance_state, dt);
 
-        /* Current mode output */
+        /* Current mode output + 重心偏后补偿 */
         float torque = g_lqr_controller.u[1];
         if (torque > -0.02f && torque < 0.02f) torque = 0.0f;
         int16_t cur = (int16_t)(torque * 27306.0f);

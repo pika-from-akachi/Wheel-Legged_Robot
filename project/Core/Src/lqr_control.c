@@ -204,8 +204,10 @@ void LQR_Update(LQR_Controller_t *lqr, BalanceState_t *measured_state, float dt)
         error[i] = lqr->x_hat[i] - lqr->reference[i];
     }
 
-    /* Integral of body angle error (with anti-windup) */
-    lqr->integral_error += error[0] * dt;
+    /* Integral (only when near upright to prevent windup) */
+    if (fabsf(error[0]) < 0.2f) {
+        lqr->integral_error += error[0] * dt;
+    }
     if (lqr->integral_error > lqr->integral_limit) {
         lqr->integral_error = lqr->integral_limit;
     } else if (lqr->integral_error < -lqr->integral_limit) {
@@ -225,8 +227,8 @@ void LQR_Update(LQR_Controller_t *lqr, BalanceState_t *measured_state, float dt)
                    lqr->gain.K[1][3] * error[3]);
     lqr->u[1] += lqr->gain.Kff[1] * lqr->reference[3];
 
-    /* Apply integral */
-    lqr->u[0] += lqr->integral_error * LQR_DEFAULT_KI;
+    /* Apply integral (unused, joint channel) */
+    lqr->u[1] += lqr->integral_error * LQR_DEFAULT_KI;
 
     /* Saturate outputs */
     LQR_ComputeControl(lqr, dt);
