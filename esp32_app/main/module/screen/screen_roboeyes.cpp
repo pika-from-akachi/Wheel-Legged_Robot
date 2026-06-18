@@ -36,16 +36,12 @@ namespace {
 
 constexpr uint16_t kScreenW = SCREEN_PLAYER_WIDTH;
 constexpr uint16_t kScreenH = SCREEN_PLAYER_HEIGHT;
-constexpr uint8_t kRoboEyesFps = 35;
-constexpr uint32_t kStartupFrameIntervalMs = 40;
-constexpr uint32_t kStartupTotalMs = 4200;
-constexpr uint32_t kLogoFadeMs = 900;
-constexpr uint32_t kRevealStartMs = 220;
-constexpr uint32_t kRevealMs = 1700;
-constexpr uint32_t kSweepStartMs = 900;
-constexpr uint32_t kSweepEndMs = 2800;
+constexpr uint8_t kRoboEyesFps = 60;
 constexpr uint16_t kDirtyPadPx = 5;
-constexpr uint16_t kMaxRegionPixels = kScreenW * 120;
+constexpr size_t kBytesPerPixel = 2;
+constexpr size_t kBackgroundBytes = static_cast<size_t>(kScreenW) * kScreenH * kBytesPerPixel;
+constexpr size_t kMaxRegionBytes = 16 * 1024;
+constexpr size_t kMaxRegionPixels = kMaxRegionBytes / kBytesPerPixel;
 
 struct DrawBounds {
     int16_t x0 = 0;
@@ -96,14 +92,15 @@ void reset_draw_ops();
 void include_bounds(DrawBounds &bounds, int16_t x0, int16_t y0, int16_t x1, int16_t y1);
 DrawBounds expand_and_clip(const DrawBounds &src, int16_t pad);
 void record_op(const DrawOp &op);
+void background_pixel(int x, int y, int &r, int &g, int &b);
 esp_err_t render_region(const DrawBounds &region);
 
 DrawBounds g_prev_bounds;
 DrawBounds g_curr_bounds;
 DrawOp g_draw_ops[40];
 uint8_t g_draw_op_count = 0;
+uint8_t *g_background_buffer = nullptr;
 uint8_t *g_region_buffer = nullptr;
-uint16_t *g_startup_line = nullptr;
 bool g_ready = false;
 bool g_active = false;
 uint32_t g_next_reposition_ms = 0;
@@ -225,11 +222,6 @@ inline void put_pixel_be(uint8_t *dst, uint16_t color)
     dst[1] = static_cast<uint8_t>(color);
 }
 
-inline uint16_t swap16(uint16_t value)
-{
-    return static_cast<uint16_t>((value >> 8) | (value << 8));
-}
-
 void reset_bounds(DrawBounds &bounds)
 {
     bounds.valid = false;
@@ -290,7 +282,7 @@ void record_op(const DrawOp &op)
 
 bool ensure_region_buffer(size_t bytes)
 {
-    if (bytes == 0) {
+    if (bytes == 0 || bytes > kMaxRegionBytes) {
         return false;
     }
 
@@ -299,48 +291,50 @@ bool ensure_region_buffer(size_t bytes)
     }
 
     g_region_buffer = static_cast<uint8_t *>(
-        heap_caps_malloc(kMaxRegionPixels * 2U, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        heap_caps_malloc(kMaxRegionBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
     if (g_region_buffer == nullptr) {
         g_region_buffer = static_cast<uint8_t *>(
-            heap_caps_malloc(kMaxRegionPixels * 2U, MALLOC_CAP_8BIT));
+            heap_caps_malloc(kMaxRegionBytes, MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
+    }
+    if (g_region_buffer == nullptr) {
+        g_region_buffer = static_cast<uint8_t *>(
+            heap_caps_malloc(kMaxRegionBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+    if (g_region_buffer == nullptr) {
+        g_region_buffer = static_cast<uint8_t *>(
+            heap_caps_malloc(kMaxRegionBytes, MALLOC_CAP_8BIT));
     }
     return g_region_buffer != nullptr;
 }
 
-float rounded_rect_distance(float px, float py, float hw, float hh, float radius)
+bool ensure_background_buffer(void)
 {
-    const float r = std::max(0.5f, std::min(radius, std::min(hw, hh) - 0.5f));
-    const float qx = fabsf(px) - (hw - r);
-    const float qy = fabsf(py) - (hh - r);
-    const float ox = std::max(qx, 0.0f);
-    const float oy = std::max(qy, 0.0f);
-    return sqrtf((ox * ox) + (oy * oy)) + std::min(std::max(qx, qy), 0.0f) - r;
-}
-
-int triangle_edge(int x0, int y0, int x1, int y1, int px, int py)
-{
-    return (px - x0) * (y1 - y0) - (py - y0) * (x1 - x0);
-}
-
-bool point_in_triangle(int px, int py, const DrawOp &op)
-{
-    const int e0 = triangle_edge(op.x0, op.y0, op.x1, op.y1, px, py);
-    const int e1 = triangle_edge(op.x1, op.y1, op.x2, op.y2, px, py);
-    const int e2 = triangle_edge(op.x2, op.y2, op.x0, op.y0, px, py);
-    return (e0 >= 0 && e1 >= 0 && e2 >= 0) || (e0 <= 0 && e1 <= 0 && e2 <= 0);
-}
-
-void blend_to(int &r, int &g, int &b, int tr, int tg, int tb, int alpha)
-{
-    if (alpha <= 0) {
-        return;
+    if (g_background_buffer != nullptr) {
+        return true;
     }
-    if (alpha > 255) {
-        alpha = 255;
+
+    g_background_buffer = static_cast<uint8_t *>(
+        heap_caps_malloc(kBackgroundBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (g_background_buffer == nullptr) {
+        g_background_buffer = static_cast<uint8_t *>(
+            heap_caps_malloc(kBackgroundBytes, MALLOC_CAP_8BIT));
     }
-    r += ((tr - r) * alpha) / 255;
-    g += ((tg - g) * alpha) / 255;
-    b += ((tb - b) * alpha) / 255;
+    if (g_background_buffer == nullptr) {
+        return false;
+    }
+
+    uint8_t *dst = g_background_buffer;
+    for (int y = 0; y < kScreenH; ++y) {
+        for (int x = 0; x < kScreenW; ++x) {
+            int r = 0;
+            int g = 0;
+            int b = 0;
+            background_pixel(x, y, r, g, b);
+            put_pixel_be(dst, rgb565(clamp_u8(r), clamp_u8(g), clamp_u8(b)));
+            dst += kBytesPerPixel;
+        }
+    }
+    return true;
 }
 
 void background_pixel(int x, int y, int &r, int &g, int &b)
@@ -359,56 +353,190 @@ void background_pixel(int x, int y, int &r, int &g, int &b)
     b = static_cast<int>((4.0f + halo * 5.0f + y_norm * 3.0f) * edge);
 }
 
-void render_roboeyes_pixel(int x, int y, int &r, int &g, int &b)
+uint8_t *region_pixel_ptr(const DrawBounds &region, int y0, int width, int x, int y)
 {
-    background_pixel(x, y, r, g, b);
+    const size_t offset =
+        (static_cast<size_t>(y - y0) * static_cast<size_t>(width) +
+         static_cast<size_t>(x - region.x0)) *
+        kBytesPerPixel;
+    return &g_region_buffer[offset];
+}
 
-    for (uint8_t i = 0; i < g_draw_op_count; ++i) {
-        const DrawOp &op = g_draw_ops[i];
-        const bool is_eye = op.color != 0;
+void copy_background_span(const DrawBounds &region, int y0, int width, int x0, int x1, int y)
+{
+    if (x1 < x0) {
+        return;
+    }
 
-        if (op.type == DrawOpType::RoundRect) {
-            if (x < op.x0 - 12 || x >= op.x0 + op.x1 + 12 ||
-                y < op.y0 - 12 || y >= op.y0 + op.y1 + 12) {
-                continue;
-            }
+    uint8_t *dst = region_pixel_ptr(region, y0, width, x0, y);
+    const size_t span_bytes = static_cast<size_t>(x1 - x0 + 1) * kBytesPerPixel;
+    if (g_background_buffer != nullptr) {
+        const size_t bg_offset =
+            (static_cast<size_t>(y) * kScreenW + static_cast<size_t>(x0)) * kBytesPerPixel;
+        memcpy(dst, &g_background_buffer[bg_offset], span_bytes);
+        return;
+    }
 
-            const float cx = static_cast<float>(op.x0) + static_cast<float>(op.x1) * 0.5f;
-            const float cy = static_cast<float>(op.y0) + static_cast<float>(op.y1) * 0.5f;
-            const float dist = rounded_rect_distance(static_cast<float>(x) + 0.5f - cx,
-                                                     static_cast<float>(y) + 0.5f - cy,
-                                                     static_cast<float>(op.x1) * 0.5f,
-                                                     static_cast<float>(op.y1) * 0.5f,
-                                                     static_cast<float>(op.x2));
-            if (is_eye) {
-                if (dist <= 10.0f) {
-                    const float glow_q = clamp01((10.0f - dist) / 10.0f);
-                    blend_to(r, g, b, 255, 176, 38, static_cast<int>(glow_q * glow_q * 115.0f));
-                }
-                if (dist <= 0.0f) {
-                    const float shade = clamp01((static_cast<float>(y) - cy) /
-                                                std::max(1.0f, static_cast<float>(op.y1)) + 0.5f);
-                    blend_to(r,
-                             g,
-                             b,
-                             255,
-                             static_cast<int>(228.0f - shade * 34.0f),
-                             static_cast<int>(72.0f - shade * 34.0f),
-                             dist > -2.0f ? 255 : 230);
-                }
-            } else if (dist <= 0.0f) {
-                background_pixel(x, y, r, g, b);
-            }
+    for (int x = x0; x <= x1; ++x) {
+        int r = 0;
+        int g = 0;
+        int b = 0;
+        background_pixel(x, y, r, g, b);
+        put_pixel_be(dst, rgb565(clamp_u8(r), clamp_u8(g), clamp_u8(b)));
+        dst += kBytesPerPixel;
+    }
+}
+
+uint16_t eye_color_for_y(const DrawOp &op, int y)
+{
+    if (op.type == DrawOpType::Triangle) {
+        return rgb565(255, 210, 46);
+    }
+
+    const float cy = static_cast<float>(op.y0) + static_cast<float>(op.y1) * 0.5f;
+    const float shade = clamp01((static_cast<float>(y) - cy) /
+                                std::max(1.0f, static_cast<float>(op.y1)) + 0.5f);
+    return rgb565(255,
+                  clamp_u8(static_cast<int>(228.0f - shade * 34.0f)),
+                  clamp_u8(static_cast<int>(72.0f - shade * 34.0f)));
+}
+
+void fill_color_span(const DrawBounds &region, int y0, int width, int x0, int x1, int y, uint16_t color)
+{
+    if (x1 < x0) {
+        return;
+    }
+
+    uint8_t *dst = region_pixel_ptr(region, y0, width, x0, y);
+    for (int x = x0; x <= x1; ++x) {
+        put_pixel_be(dst, color);
+        dst += kBytesPerPixel;
+    }
+}
+
+void draw_op_span(const DrawBounds &region,
+                  int y0,
+                  int width,
+                  const DrawOp &op,
+                  int x0,
+                  int x1,
+                  int y)
+{
+    x0 = std::max<int>(x0, region.x0);
+    x1 = std::min<int>(x1, region.x1);
+    if (x1 < x0) {
+        return;
+    }
+
+    if (op.color != 0) {
+        fill_color_span(region, y0, width, x0, x1, y, eye_color_for_y(op, y));
+    } else {
+        copy_background_span(region, y0, width, x0, x1, y);
+    }
+}
+
+int rounded_rect_row_inset(int local_y, int height, int radius)
+{
+    if (radius <= 0 || (local_y >= radius && local_y < height - radius)) {
+        return 0;
+    }
+
+    float dy = 0.0f;
+    if (local_y < radius) {
+        dy = static_cast<float>(radius) - (static_cast<float>(local_y) + 0.5f);
+    } else {
+        dy = (static_cast<float>(local_y) + 0.5f) - static_cast<float>(height - radius);
+    }
+
+    const float rr = static_cast<float>(radius * radius);
+    const float dx = sqrtf(std::max(0.0f, rr - dy * dy));
+    return std::max(0, static_cast<int>(ceilf(static_cast<float>(radius) - dx)));
+}
+
+void draw_round_rect_op(const DrawBounds &region, int y0, int rows, int width, const DrawOp &op)
+{
+    const int rect_w = op.x1;
+    const int rect_h = op.y1;
+    if (rect_w <= 0 || rect_h <= 0) {
+        return;
+    }
+
+    const int y_start = std::max<int>(y0, op.y0);
+    const int y_end = std::min<int>(y0 + rows - 1, op.y0 + rect_h - 1);
+    if (y_end < y_start) {
+        return;
+    }
+
+    const int radius = std::clamp<int>(op.x2, 0, std::min(rect_w, rect_h) / 2);
+    for (int y = y_start; y <= y_end; ++y) {
+        const int inset = rounded_rect_row_inset(y - op.y0, rect_h, radius);
+        draw_op_span(region,
+                     y0,
+                     width,
+                     op,
+                     static_cast<int>(op.x0) + inset,
+                     static_cast<int>(op.x0) + rect_w - 1 - inset,
+                     y);
+    }
+}
+
+void add_triangle_intersection(float scan_y,
+                               int x0,
+                               int y0,
+                               int x1,
+                               int y1,
+                               float *intersections,
+                               uint8_t &count)
+{
+    if (y0 == y1 || count >= 3) {
+        return;
+    }
+
+    const int min_y = std::min(y0, y1);
+    const int max_y = std::max(y0, y1);
+    if (scan_y < static_cast<float>(min_y) || scan_y >= static_cast<float>(max_y)) {
+        return;
+    }
+
+    const float t = (scan_y - static_cast<float>(y0)) / static_cast<float>(y1 - y0);
+    intersections[count++] = static_cast<float>(x0) + t * static_cast<float>(x1 - x0);
+}
+
+void draw_triangle_op(const DrawBounds &region, int y0, int rows, int width, const DrawOp &op)
+{
+    const int tri_y0 = std::min<int>(op.y0, std::min<int>(op.y1, op.y2));
+    const int tri_y1 = std::max<int>(op.y0, std::max<int>(op.y1, op.y2));
+    const int y_start = std::max<int>(y0, tri_y0);
+    const int y_end = std::min<int>(y0 + rows - 1, tri_y1);
+    if (y_end < y_start) {
+        return;
+    }
+
+    for (int y = y_start; y <= y_end; ++y) {
+        float xs[3] = {};
+        uint8_t count = 0;
+        const float scan_y = static_cast<float>(y) + 0.5f;
+        add_triangle_intersection(scan_y, op.x0, op.y0, op.x1, op.y1, xs, count);
+        add_triangle_intersection(scan_y, op.x1, op.y1, op.x2, op.y2, xs, count);
+        add_triangle_intersection(scan_y, op.x2, op.y2, op.x0, op.y0, xs, count);
+        if (count < 2) {
             continue;
         }
 
-        if (point_in_triangle(x, y, op)) {
-            if (is_eye) {
-                blend_to(r, g, b, 255, 210, 46, 235);
-            } else {
-                background_pixel(x, y, r, g, b);
-            }
+        float min_x = xs[0];
+        float max_x = xs[0];
+        for (uint8_t i = 1; i < count; ++i) {
+            min_x = std::min(min_x, xs[i]);
+            max_x = std::max(max_x, xs[i]);
         }
+
+        draw_op_span(region,
+                     y0,
+                     width,
+                     op,
+                     static_cast<int>(ceilf(min_x)),
+                     static_cast<int>(floorf(max_x)),
+                     y);
     }
 }
 
@@ -422,13 +550,30 @@ esp_err_t render_region_rows(const DrawBounds &region, int y0, int rows)
 
     uint8_t *dst = g_region_buffer;
     for (int y = y0; y < y0 + rows; ++y) {
-        for (int x = region.x0; x <= region.x1; ++x) {
-            int r = 0;
-            int g = 0;
-            int b = 0;
-            render_roboeyes_pixel(x, y, r, g, b);
-            put_pixel_be(dst, rgb565(clamp_u8(r), clamp_u8(g), clamp_u8(b)));
-            dst += 2;
+        if (g_background_buffer != nullptr) {
+            const size_t offset =
+                (static_cast<size_t>(y) * kScreenW + static_cast<size_t>(region.x0)) * kBytesPerPixel;
+            const size_t row_bytes = static_cast<size_t>(width) * kBytesPerPixel;
+            memcpy(dst, &g_background_buffer[offset], row_bytes);
+            dst += row_bytes;
+        } else {
+            for (int x = region.x0; x <= region.x1; ++x) {
+                int r = 0;
+                int g = 0;
+                int b = 0;
+                background_pixel(x, y, r, g, b);
+                put_pixel_be(dst, rgb565(clamp_u8(r), clamp_u8(g), clamp_u8(b)));
+                dst += kBytesPerPixel;
+            }
+        }
+    }
+
+    for (uint8_t i = 0; i < g_draw_op_count; ++i) {
+        const DrawOp &op = g_draw_ops[i];
+        if (op.type == DrawOpType::RoundRect) {
+            draw_round_rect_op(region, y0, rows, width, op);
+        } else {
+            draw_triangle_op(region, y0, rows, width, op);
         }
     }
 
@@ -453,109 +598,6 @@ esp_err_t render_region(const DrawBounds &region)
             return ret;
         }
     }
-    return ESP_OK;
-}
-
-bool ensure_startup_line(void)
-{
-    if (g_startup_line != nullptr) {
-        return true;
-    }
-    g_startup_line = static_cast<uint16_t *>(
-        heap_caps_malloc(kScreenW * sizeof(uint16_t), MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
-    if (g_startup_line == nullptr) {
-        g_startup_line = static_cast<uint16_t *>(heap_caps_malloc(kScreenW * sizeof(uint16_t), MALLOC_CAP_8BIT));
-    }
-    return g_startup_line != nullptr;
-}
-
-void render_startup_pixel(uint32_t elapsed_ms, int x, int y, int &r, int &g, int &b)
-{
-    const int center_x = kScreenW / 2;
-    const int center_y = kScreenH / 2;
-    const float dx = static_cast<float>(x - center_x);
-    const float dy = static_cast<float>(y - center_y);
-    const float max_radius = sqrtf(static_cast<float>(center_x * center_x + center_y * center_y));
-    const float bg_fade = smoothstep01(static_cast<float>(elapsed_ms) / static_cast<float>(kLogoFadeMs));
-    const float radial = sqrtf((dx * dx) + (dy * dy)) / max_radius;
-    const float vignette = clamp01(1.0f - radial);
-    const float y_norm = static_cast<float>(y) / static_cast<float>(kScreenH - 1);
-
-    r = static_cast<int>((4.0f + 12.0f * vignette + 2.0f * (1.0f - y_norm)) * bg_fade);
-    g = static_cast<int>((6.0f + 17.0f * vignette + 2.0f * (1.0f - y_norm)) * bg_fade);
-    b = static_cast<int>((5.0f + 7.0f * vignette + 2.0f * y_norm) * bg_fade);
-
-    float reveal_t = (static_cast<float>(elapsed_ms) - static_cast<float>(kRevealStartMs)) /
-                     static_cast<float>(kRevealMs);
-    reveal_t = smoothstep01(reveal_t);
-    const float reveal_radius = reveal_t * max_radius;
-    const float reveal_inner = std::max(0.0f, reveal_radius - 18.0f);
-    const float reveal_outer = reveal_radius + 18.0f;
-    const float d = sqrtf((dx * dx) + (dy * dy));
-
-    float ring_alpha = 0.0f;
-    if (d >= reveal_inner && d <= reveal_outer && reveal_outer > reveal_inner) {
-        ring_alpha = 1.0f - fabsf(d - reveal_radius) / 18.0f;
-    }
-
-    float core_alpha = 0.0f;
-    const float core_x = dx / 88.0f;
-    const float core_y = dy / 42.0f;
-    const float core = (core_x * core_x) + (core_y * core_y);
-    if (core < 1.0f && d < reveal_radius) {
-        core_alpha = smoothstep01((1.0f - core) / 0.42f) * bg_fade;
-    }
-
-    float sweep_gain = 0.0f;
-    if (elapsed_ms >= kSweepStartMs && elapsed_ms <= kSweepEndMs) {
-        const float sweep_t = static_cast<float>(elapsed_ms - kSweepStartMs) /
-                              static_cast<float>(kSweepEndMs - kSweepStartMs);
-        const float sweep_pos = -60.0f + sweep_t * (static_cast<float>(kScreenW + kScreenH) + 120.0f);
-        const float line_dist = fabsf(static_cast<float>(x + y) - sweep_pos);
-        if (line_dist < 24.0f) {
-            const float q = 1.0f - line_dist / 24.0f;
-            sweep_gain = q * q;
-        }
-    }
-
-    blend_to(r, g, b, 255, 183, 42, static_cast<int>(ring_alpha * 160.0f));
-    blend_to(r, g, b, 255, 214, 64, static_cast<int>(core_alpha * 210.0f));
-    blend_to(r, g, b, 255, 232, 130, static_cast<int>(sweep_gain * 150.0f));
-}
-
-esp_err_t render_startup_frame(uint32_t elapsed_ms)
-{
-    if (!ensure_startup_line()) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    const int64_t start_us = esp_timer_get_time();
-    for (int y = 0; y < kScreenH; ++y) {
-        for (int x = 0; x < kScreenW; ++x) {
-            int r = 0;
-            int g = 0;
-            int b = 0;
-            render_startup_pixel(elapsed_ms, x, y, r, g, b);
-            g_startup_line[x] = swap16(rgb565(clamp_u8(r), clamp_u8(g), clamp_u8(b)));
-        }
-
-        const esp_err_t ret = screen_player_draw_rgb565_rect(0,
-                                                             y,
-                                                             kScreenW,
-                                                             1,
-                                                             g_startup_line,
-                                                             kScreenW * sizeof(uint16_t));
-        if (ret != ESP_OK) {
-            screen_player_report_frame(ret,
-                                       static_cast<uint32_t>(esp_timer_get_time() - start_us),
-                                       "startup_frame_failed");
-            return ret;
-        }
-    }
-
-    screen_player_report_frame(ESP_OK,
-                               static_cast<uint32_t>(esp_timer_get_time() - start_us),
-                               nullptr);
     return ESP_OK;
 }
 
@@ -664,43 +706,16 @@ void ensure_ready(void)
     reset_bounds(g_prev_bounds);
     reset_bounds(g_curr_bounds);
     reset_draw_ops();
+    ensure_background_buffer();
     g_eyes.begin(kScreenW, kScreenH, kRoboEyesFps);
     g_eyes.setDisplayColors(0, 255);
+    g_eyes.setIdleMode(ON, 2, 2);
+    g_eyes.setAutoblinker(ON, 3, 2);
     g_eyes.open();
     g_ready = true;
 }
 
 } // namespace
-
-extern "C" esp_err_t screen_roboeyes_play_startup(void)
-{
-    const uint32_t begin_ms = millis();
-    uint32_t last_frame_ms = 0;
-
-    while (true) {
-        const uint32_t now_ms = millis();
-        uint32_t elapsed_ms = now_ms - begin_ms;
-        if (elapsed_ms > kStartupTotalMs) {
-            elapsed_ms = kStartupTotalMs;
-        }
-
-        if (last_frame_ms == 0 || now_ms - last_frame_ms >= kStartupFrameIntervalMs ||
-            elapsed_ms >= kStartupTotalMs) {
-            const esp_err_t ret = render_startup_frame(elapsed_ms);
-            if (ret != ESP_OK) {
-                return ret;
-            }
-            last_frame_ms = now_ms;
-        }
-
-        if (elapsed_ms >= kStartupTotalMs) {
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(5));
-    }
-
-    return ESP_OK;
-}
 
 extern "C" esp_err_t screen_roboeyes_begin_expression(const char *expression)
 {
@@ -716,7 +731,10 @@ extern "C" esp_err_t screen_roboeyes_begin_expression(const char *expression)
 
     apply_profile(profile_for_expression(g_expression), true);
     g_active = true;
-    g_eyes.drawEyes();
+    for (int i = 0; i < 8; ++i) {
+        g_eyes.drawEyes();
+        vTaskDelay(pdMS_TO_TICKS(18));
+    }
     return ESP_OK;
 }
 

@@ -25,9 +25,9 @@ files together. Shared board-level pin and peripheral defaults belong in
 
 ## Round TFT RoboEyes
 
-The ST77916 360x360 round TFT is driven over QSPI. After panel init and a short
-settle delay, firmware renders a startup reveal and then hands expression timing
-to the external FluxGarage RoboEyes library.
+The ST77916 360x360 round TFT is driven over QSPI. After panel init, firmware
+starts the external FluxGarage RoboEyes library and drives its real-time program
+animation from the app tick loop.
 
 The build pins RoboEyes to `b42f8e596535234932be3514ac7a813d4ced0046`. By
 default CMake clones it under `build/_deps/`; for offline builds, point CMake at

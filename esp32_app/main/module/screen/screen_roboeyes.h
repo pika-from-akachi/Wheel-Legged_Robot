@@ -7,7 +7,6 @@
 extern "C" {
 #endif
 
-esp_err_t screen_roboeyes_play_startup(void);
 esp_err_t screen_roboeyes_begin_expression(const char *expression);
 esp_err_t screen_roboeyes_update(void);
 

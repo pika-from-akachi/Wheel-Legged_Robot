@@ -13,40 +13,272 @@
 #include "screen_roboeyes.h"
 
 #define ST77916_CMD_SWRESET 0x01
-#define ST77916_CMD_SLPOUT  0x11
-#define ST77916_CMD_NORON   0x13
-#define ST77916_CMD_INVOFF  0x20
-#define ST77916_CMD_DISPON  0x29
 #define ST77916_CMD_CASET   0x2A
 #define ST77916_CMD_RASET   0x2B
 #define ST77916_CMD_RAMWR   0x2C
-#define ST77916_CMD_TEOFF   0x34
-#define ST77916_CMD_MADCTL  0x36
-#define ST77916_CMD_IDMOFF  0x38
-#define ST77916_CMD_COLMOD  0x3A
-#define ST77916_CMD_WRDISBV 0x51
-#define ST77916_CMD_WRCTRLD 0x53
-#define ST77916_CMD_RESSET1 0xD0
-#define ST77916_CMD_RESSET2 0xD1
-#define ST77916_CMD_RESSET3 0xD2
 
+#define ST77916_SPI_WRITE_CMD 0x02
 #define ST77916_QSPI_WRITE 0x32
+#define ST77916_CMD_BUFFER_BYTES 64
 #define ST77916_SPI_MAX_TRANSFER_BYTES (16 * 1024)
 #define SCREEN_FILL_ROWS 20
-#define SCREEN_TASK_STACK 12288
-#define SCREEN_TASK_PRIORITY 4
-#define SCREEN_BOOT_SETTLE_MS 650
+#define SCREEN_TICK_TASK_STACK 4096
+#define SCREEN_TICK_TASK_PRIORITY 5
+#define SCREEN_TICK_TASK_CORE 1
+#define SCREEN_TICK_INTERVAL_MS 2
 #define SCREEN_ROBOEYES_ASSET "roboeyes_normal"
+
+typedef struct {
+    uint8_t cmd;
+    uint8_t data[14];
+    uint8_t data_len;
+    uint16_t delay_ms;
+} lcd_init_cmd_t;
 
 static const char *TAG = "SCREEN_PLAYER";
 
 static screen_player_status_t s_status;
 static screen_player_config_t s_config;
 static spi_device_handle_t s_lcd_spi;
+static uint8_t *s_spi_cmd_buffer;
 static uint8_t *s_spi_tx_buffer;
-static TaskHandle_t s_player_task;
+static TaskHandle_t s_tick_task;
 
-static esp_err_t lcd_qspi_write(uint8_t cmd, const void *data, size_t len)
+static const lcd_init_cmd_t s_boe_st77916_init[] = {
+    {0xF0, {0x28}, 1, 0},
+    {0xF2, {0x28}, 1, 0},
+    {0x73, {0xF0}, 1, 0},
+    {0x76, {0x0F}, 1, 0},
+    {0x7C, {0xD1}, 1, 0},
+    {0x83, {0xE0}, 1, 0},
+    {0x84, {0x61}, 1, 0},
+    {0xF2, {0x82}, 1, 0},
+    {0xF0, {0x00}, 1, 0},
+    {0xF0, {0x01}, 1, 0},
+    {0xF1, {0x01}, 1, 0},
+    {0xB0, {0x52}, 1, 0},
+    {0xB1, {0x49}, 1, 0},
+    {0xB2, {0x24}, 1, 0},
+    {0xB3, {0x01}, 1, 0},
+    {0xB4, {0x66}, 1, 0},
+    {0xB5, {0x44}, 1, 0},
+    {0xB6, {0xC5}, 1, 0},
+    {0xB7, {0x40}, 1, 0},
+    {0xB8, {0x86}, 1, 0},
+    {0xB9, {0x15}, 1, 0},
+    {0xBA, {0x00}, 1, 0},
+    {0xBB, {0x08}, 1, 0},
+    {0xBC, {0x08}, 1, 0},
+    {0xBD, {0x00}, 1, 0},
+    {0xBE, {0x00}, 1, 0},
+    {0xBF, {0x07}, 1, 0},
+    {0xC0, {0x80}, 1, 0},
+    {0xC1, {0x10}, 1, 0},
+    {0xC2, {0x37}, 1, 0},
+    {0xC3, {0x80}, 1, 0},
+    {0xC4, {0x10}, 1, 0},
+    {0xC5, {0x37}, 1, 0},
+    {0xC6, {0xA9}, 1, 0},
+    {0xC7, {0x41}, 1, 0},
+    {0xC8, {0x01}, 1, 0},
+    {0xC9, {0xA9}, 1, 0},
+    {0xCA, {0x41}, 1, 0},
+    {0xCB, {0x01}, 1, 0},
+    {0xCC, {0x7F}, 1, 0},
+    {0xCD, {0x7F}, 1, 0},
+    {0xCE, {0xFF}, 1, 0},
+    {0xD0, {0x91}, 1, 0},
+    {0xD1, {0x68}, 1, 0},
+    {0xD2, {0x68}, 1, 0},
+    {0xF5, {0x00, 0xA5}, 2, 0},
+    {0xF1, {0x10}, 1, 0},
+    {0xF0, {0x00}, 1, 0},
+    {0xF0, {0x02}, 1, 0},
+    {0xE0, {0xF0, 0x0E, 0x14, 0x0B, 0x0B, 0x16, 0x3A, 0x44, 0x4E, 0x18, 0x14, 0x13, 0x2F, 0x35}, 14, 0},
+    {0xE1, {0xF0, 0x0D, 0x13, 0x0B, 0x0A, 0x16, 0x39, 0x43, 0x4E, 0x17, 0x13, 0x13, 0x2E, 0x34}, 14, 0},
+    {0xF0, {0x10}, 1, 0},
+    {0xF3, {0x10}, 1, 0},
+    {0xE0, {0x09}, 1, 0},
+    {0xE1, {0x00}, 1, 0},
+    {0xE2, {0x03}, 1, 0},
+    {0xE3, {0x00}, 1, 0},
+    {0xE4, {0xE0}, 1, 0},
+    {0xE5, {0x06}, 1, 0},
+    {0xE6, {0x21}, 1, 0},
+    {0xE7, {0x00}, 1, 0},
+    {0xE8, {0x05}, 1, 0},
+    {0xE9, {0x82}, 1, 0},
+    {0xEA, {0xDE}, 1, 0},
+    {0xEB, {0xC0}, 1, 0},
+    {0xEC, {0x40}, 1, 0},
+    {0xED, {0x84}, 1, 0},
+    {0xEE, {0xFF}, 1, 0},
+    {0xEF, {0x71}, 1, 0},
+    {0xF8, {0xFF}, 1, 0},
+    {0xF9, {0x50}, 1, 0},
+    {0xFA, {0xFF}, 1, 0},
+    {0xFB, {0xF3}, 1, 0},
+    {0xFC, {0x00}, 1, 0},
+    {0xFD, {0x00}, 1, 0},
+    {0xFE, {0x00}, 1, 0},
+    {0xFF, {0x00}, 1, 0},
+    {0x60, {0x42}, 1, 0},
+    {0x61, {0xDF}, 1, 0},
+    {0x62, {0x40}, 1, 0},
+    {0x63, {0x40}, 1, 0},
+    {0x64, {0x02}, 1, 0},
+    {0x65, {0x00}, 1, 0},
+    {0x66, {0x00}, 1, 0},
+    {0x67, {0x00}, 1, 0},
+    {0x68, {0x00}, 1, 0},
+    {0x69, {0x00}, 1, 0},
+    {0x6A, {0x00}, 1, 0},
+    {0x6B, {0x00}, 1, 0},
+    {0x70, {0x42}, 1, 0},
+    {0x71, {0xDF}, 1, 0},
+    {0x72, {0x40}, 1, 0},
+    {0x73, {0x40}, 1, 0},
+    {0x74, {0x01}, 1, 0},
+    {0x75, {0x00}, 1, 0},
+    {0x76, {0x00}, 1, 0},
+    {0x77, {0x00}, 1, 0},
+    {0x78, {0x00}, 1, 0},
+    {0x79, {0x00}, 1, 0},
+    {0x7A, {0x00}, 1, 0},
+    {0x7B, {0x00}, 1, 0},
+    {0x80, {0x48}, 1, 0},
+    {0x81, {0x00}, 1, 0},
+    {0x82, {0x04}, 1, 0},
+    {0x83, {0x02}, 1, 0},
+    {0x84, {0xDC}, 1, 0},
+    {0x85, {0x00}, 1, 0},
+    {0x86, {0x00}, 1, 0},
+    {0x87, {0x00}, 1, 0},
+    {0x88, {0x48}, 1, 0},
+    {0x89, {0x00}, 1, 0},
+    {0x8A, {0x06}, 1, 0},
+    {0x8B, {0x02}, 1, 0},
+    {0x8C, {0xDE}, 1, 0},
+    {0x8D, {0x00}, 1, 0},
+    {0x8E, {0x00}, 1, 0},
+    {0x8F, {0x00}, 1, 0},
+    {0x90, {0x48}, 1, 0},
+    {0x91, {0x00}, 1, 0},
+    {0x92, {0x08}, 1, 0},
+    {0x93, {0x02}, 1, 0},
+    {0x94, {0xE0}, 1, 0},
+    {0x95, {0x00}, 1, 0},
+    {0x96, {0x00}, 1, 0},
+    {0x97, {0x00}, 1, 0},
+    {0x98, {0x48}, 1, 0},
+    {0x99, {0x00}, 1, 0},
+    {0x9A, {0x0A}, 1, 0},
+    {0x9B, {0x02}, 1, 0},
+    {0x9C, {0xE2}, 1, 0},
+    {0x9D, {0x00}, 1, 0},
+    {0x9E, {0x00}, 1, 0},
+    {0x9F, {0x00}, 1, 0},
+    {0xA0, {0x48}, 1, 0},
+    {0xA1, {0x00}, 1, 0},
+    {0xA2, {0x03}, 1, 0},
+    {0xA3, {0x02}, 1, 0},
+    {0xA4, {0xDB}, 1, 0},
+    {0xA5, {0x00}, 1, 0},
+    {0xA6, {0x00}, 1, 0},
+    {0xA7, {0x00}, 1, 0},
+    {0xA8, {0x48}, 1, 0},
+    {0xA9, {0x00}, 1, 0},
+    {0xAA, {0x05}, 1, 0},
+    {0xAB, {0x02}, 1, 0},
+    {0xAC, {0xDD}, 1, 0},
+    {0xAD, {0x00}, 1, 0},
+    {0xAE, {0x00}, 1, 0},
+    {0xAF, {0x00}, 1, 0},
+    {0xB0, {0x48}, 1, 0},
+    {0xB1, {0x00}, 1, 0},
+    {0xB2, {0x07}, 1, 0},
+    {0xB3, {0x02}, 1, 0},
+    {0xB4, {0xDF}, 1, 0},
+    {0xB5, {0x00}, 1, 0},
+    {0xB6, {0x00}, 1, 0},
+    {0xB7, {0x00}, 1, 0},
+    {0xB8, {0x48}, 1, 0},
+    {0xB9, {0x00}, 1, 0},
+    {0xBA, {0x09}, 1, 0},
+    {0xBB, {0x02}, 1, 0},
+    {0xBC, {0xE1}, 1, 0},
+    {0xBD, {0x00}, 1, 0},
+    {0xBE, {0x00}, 1, 0},
+    {0xBF, {0x00}, 1, 0},
+    {0xC0, {0x65}, 1, 0},
+    {0xC1, {0x74}, 1, 0},
+    {0xC2, {0x47}, 1, 0},
+    {0xC3, {0x56}, 1, 0},
+    {0xC4, {0xAA}, 1, 0},
+    {0xC5, {0x11}, 1, 0},
+    {0xC6, {0x00}, 1, 0},
+    {0xC7, {0x2A}, 1, 0},
+    {0xC8, {0xA2}, 1, 0},
+    {0xC9, {0x33}, 1, 0},
+    {0xD0, {0x65}, 1, 0},
+    {0xD1, {0x74}, 1, 0},
+    {0xD2, {0x47}, 1, 0},
+    {0xD3, {0x56}, 1, 0},
+    {0xD4, {0xAA}, 1, 0},
+    {0xD5, {0x11}, 1, 0},
+    {0xD6, {0x00}, 1, 0},
+    {0xD7, {0x2A}, 1, 0},
+    {0xD8, {0xA2}, 1, 0},
+    {0xD9, {0x33}, 1, 0},
+    {0xF3, {0x01}, 1, 0},
+    {0xF0, {0x00}, 1, 0},
+    {0x21, {0}, 0, 0},
+    {0x11, {0}, 0, 120},
+    {0x29, {0}, 0, 0},
+    {0x3A, {0x55}, 1, 0},
+};
+
+static esp_err_t lcd_ensure_cmd_buffer(void)
+{
+    if (s_spi_cmd_buffer != NULL) {
+        return ESP_OK;
+    }
+
+    s_spi_cmd_buffer = heap_caps_malloc(ST77916_CMD_BUFFER_BYTES,
+                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    return s_spi_cmd_buffer == NULL ? ESP_ERR_NO_MEM : ESP_OK;
+}
+
+static esp_err_t lcd_spi_write_command(uint8_t cmd, const void *data, size_t len)
+{
+    if (s_lcd_spi == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (data == NULL && len > 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (len + 4U > ST77916_CMD_BUFFER_BYTES) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    ESP_RETURN_ON_ERROR(lcd_ensure_cmd_buffer(), TAG, "lcd cmd buffer alloc failed");
+
+    s_spi_cmd_buffer[0] = ST77916_SPI_WRITE_CMD;
+    s_spi_cmd_buffer[1] = 0x00;
+    s_spi_cmd_buffer[2] = cmd;
+    s_spi_cmd_buffer[3] = 0x00;
+    if (len > 0) {
+        memcpy(&s_spi_cmd_buffer[4], data, len);
+    }
+
+    spi_transaction_t trans = {
+        .length = (len + 4U) * 8U,
+        .tx_buffer = s_spi_cmd_buffer,
+    };
+    return spi_device_polling_transmit(s_lcd_spi, &trans);
+}
+
+static esp_err_t lcd_qspi_write_pixels(uint8_t cmd, const void *data, size_t len)
 {
     if (s_lcd_spi == NULL) {
         return ESP_ERR_INVALID_STATE;
@@ -115,12 +347,27 @@ static esp_err_t lcd_qspi_write(uint8_t cmd, const void *data, size_t len)
 
 static esp_err_t lcd_tx_param(uint8_t cmd, const void *param, size_t len)
 {
-    return lcd_qspi_write(cmd, param, len);
+    return lcd_spi_write_command(cmd, param, len);
 }
 
 static esp_err_t lcd_tx_cmd(uint8_t cmd)
 {
     return lcd_tx_param(cmd, NULL, 0);
+}
+
+static esp_err_t lcd_run_init_sequence(void)
+{
+    for (size_t i = 0; i < sizeof(s_boe_st77916_init) / sizeof(s_boe_st77916_init[0]); ++i) {
+        const lcd_init_cmd_t *entry = &s_boe_st77916_init[i];
+        ESP_RETURN_ON_ERROR(lcd_tx_param(entry->cmd, entry->data, entry->data_len),
+                            TAG,
+                            "BOE ST77916 init cmd 0x%02x failed",
+                            entry->cmd);
+        if (entry->delay_ms > 0) {
+            vTaskDelay(pdMS_TO_TICKS(entry->delay_ms));
+        }
+    }
+    return ESP_OK;
 }
 
 static esp_err_t lcd_set_window(int x, int y, int width, int height)
@@ -160,9 +407,9 @@ static esp_err_t lcd_reset_panel(void)
     gpio_set_level(s_config.reset_gpio, 1);
     vTaskDelay(pdMS_TO_TICKS(10));
     gpio_set_level(s_config.reset_gpio, 0);
-    vTaskDelay(pdMS_TO_TICKS(20));
+    vTaskDelay(pdMS_TO_TICKS(100));
     gpio_set_level(s_config.reset_gpio, 1);
-    vTaskDelay(pdMS_TO_TICKS(120));
+    vTaskDelay(pdMS_TO_TICKS(100));
     return ESP_OK;
 }
 
@@ -191,41 +438,18 @@ static esp_err_t lcd_init_backlight(void)
         .intr_type = GPIO_INTR_DISABLE,
     };
     ESP_RETURN_ON_ERROR(gpio_config(&io_conf), TAG, "backlight gpio config failed");
-    return lcd_backlight_set(false);
+    return lcd_backlight_set(true);
 }
 
 static esp_err_t lcd_init_panel(void)
 {
     ESP_RETURN_ON_ERROR(lcd_init_backlight(), TAG, "backlight init failed");
     ESP_RETURN_ON_ERROR(lcd_reset_panel(), TAG, "panel reset failed");
-
-    const uint8_t resset1 = 0x91;
-    const uint8_t resset2 = 0x68;
-    const uint8_t resset3 = 0x86;
-    const uint8_t colmod = 0x05;
-    const uint8_t madctl = 0x00;
-    const uint8_t brightness = 0xFF;
-    const uint8_t ctrl_display = 0x2C;
-
-    ESP_RETURN_ON_ERROR(lcd_tx_cmd(ST77916_CMD_SWRESET), TAG, "software reset failed");
-    vTaskDelay(pdMS_TO_TICKS(120));
-    ESP_RETURN_ON_ERROR(lcd_tx_param(ST77916_CMD_RESSET1, &resset1, 1), TAG, "RESSET1 failed");
-    ESP_RETURN_ON_ERROR(lcd_tx_param(ST77916_CMD_RESSET2, &resset2, 1), TAG, "RESSET2 failed");
-    ESP_RETURN_ON_ERROR(lcd_tx_param(ST77916_CMD_RESSET3, &resset3, 1), TAG, "RESSET3 failed");
-    ESP_RETURN_ON_ERROR(lcd_tx_param(ST77916_CMD_MADCTL, &madctl, 1), TAG, "MADCTL failed");
-    ESP_RETURN_ON_ERROR(lcd_tx_param(ST77916_CMD_COLMOD, &colmod, 1), TAG, "COLMOD failed");
-    ESP_RETURN_ON_ERROR(lcd_tx_cmd(ST77916_CMD_IDMOFF), TAG, "idle off failed");
-    ESP_RETURN_ON_ERROR(lcd_tx_cmd(ST77916_CMD_TEOFF), TAG, "TE off failed");
-    ESP_RETURN_ON_ERROR(lcd_tx_param(ST77916_CMD_WRDISBV, &brightness, 1), TAG, "brightness failed");
-    ESP_RETURN_ON_ERROR(lcd_tx_param(ST77916_CMD_WRCTRLD, &ctrl_display, 1), TAG, "display ctrl failed");
-    ESP_RETURN_ON_ERROR(lcd_tx_cmd(ST77916_CMD_INVOFF), TAG, "invert off failed");
-    ESP_RETURN_ON_ERROR(lcd_tx_cmd(ST77916_CMD_SLPOUT), TAG, "sleep out failed");
-    vTaskDelay(pdMS_TO_TICKS(120));
-    ESP_RETURN_ON_ERROR(lcd_tx_cmd(ST77916_CMD_NORON), TAG, "normal on failed");
-    ESP_RETURN_ON_ERROR(lcd_set_window(0, 0, SCREEN_PLAYER_WIDTH, SCREEN_PLAYER_HEIGHT), TAG, "set full window failed");
-    ESP_RETURN_ON_ERROR(lcd_tx_cmd(ST77916_CMD_DISPON), TAG, "display on failed");
-    vTaskDelay(pdMS_TO_TICKS(20));
     ESP_RETURN_ON_ERROR(lcd_backlight_set(true), TAG, "backlight on failed");
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    ESP_RETURN_ON_ERROR(lcd_run_init_sequence(), TAG, "BOE ST77916 panel init failed");
+    ESP_RETURN_ON_ERROR(lcd_set_window(0, 0, SCREEN_PLAYER_WIDTH, SCREEN_PLAYER_HEIGHT), TAG, "set full window failed");
     return ESP_OK;
 }
 
@@ -243,7 +467,7 @@ esp_err_t screen_player_draw_rgb565_rect(int x, int y, int width, int height, co
     }
 
     ESP_RETURN_ON_ERROR(lcd_set_window(x, y, width, height), TAG, "set draw window failed");
-    return lcd_qspi_write(ST77916_CMD_RAMWR, rgb565, len);
+    return lcd_qspi_write_pixels(ST77916_CMD_RAMWR, rgb565, len);
 }
 
 esp_err_t screen_player_fill_rgb565(uint16_t rgb565)
@@ -299,44 +523,33 @@ void screen_player_report_frame(esp_err_t ret, uint32_t elapsed_us, const char *
     s_status.last_error = error == NULL ? "screen_frame_failed" : error;
 }
 
-static void player_task(void *arg)
+static void screen_player_tick_task(void *arg)
 {
     (void)arg;
+    TickType_t wake_time = xTaskGetTickCount();
+    const TickType_t interval_ticks =
+        pdMS_TO_TICKS(SCREEN_TICK_INTERVAL_MS) > 0 ? pdMS_TO_TICKS(SCREEN_TICK_INTERVAL_MS) : 1;
 
-    s_status.playing = true;
-    s_status.active_asset = "startup_settle";
-    s_status.last_error = NULL;
-    vTaskDelay(pdMS_TO_TICKS(SCREEN_BOOT_SETTLE_MS));
+    while (true) {
+        (void)screen_player_tick();
+        vTaskDelayUntil(&wake_time, interval_ticks);
+    }
+}
 
-    s_status.active_asset = "startup_reveal";
-    esp_err_t ret = screen_roboeyes_play_startup();
-    if (ret != ESP_OK) {
-        s_status.last_error = "startup_reveal_failed";
-        ESP_LOGW(TAG, "startup reveal failed: %s", esp_err_to_name(ret));
+static esp_err_t screen_player_start_tick_task(void)
+{
+    if (s_tick_task != NULL) {
+        return ESP_OK;
     }
 
-    s_status.active_asset = SCREEN_ROBOEYES_ASSET;
-    ret = screen_roboeyes_begin_expression("normal");
-    if (ret != ESP_OK) {
-        s_status.last_error = "roboeyes_begin_failed";
-        ESP_LOGW(TAG, "RoboEyes begin failed: %s", esp_err_to_name(ret));
-        vTaskDelete(NULL);
-        return;
-    }
-
-    ESP_LOGI(TAG, "RoboEyes animation active: %dx%d QSPI",
-             SCREEN_PLAYER_WIDTH,
-             SCREEN_PLAYER_HEIGHT);
-
-    while (1) {
-        ret = screen_roboeyes_update();
-        if (ret != ESP_OK) {
-            screen_player_report_frame(ret, 0, "roboeyes_update_failed");
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
+    const BaseType_t ok = xTaskCreatePinnedToCore(screen_player_tick_task,
+                                                  "screen_tick",
+                                                  SCREEN_TICK_TASK_STACK,
+                                                  NULL,
+                                                  SCREEN_TICK_TASK_PRIORITY,
+                                                  &s_tick_task,
+                                                  SCREEN_TICK_TASK_CORE);
+    return ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
 esp_err_t screen_player_init(const screen_player_config_t *config)
@@ -351,6 +564,7 @@ esp_err_t screen_player_init(const screen_player_config_t *config)
         .initialized = false,
         .last_error = config->enabled ? "not_initialized" : "disabled",
     };
+    s_tick_task = NULL;
 
     if (!config->enabled) {
         return ESP_OK;
@@ -404,24 +618,49 @@ esp_err_t screen_player_start_eyes(void)
     if (!s_status.initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (s_player_task != NULL) {
+    if (s_status.playing) {
         return ESP_OK;
     }
 
-    s_status.playing = true;
-    s_status.active_asset = "startup_settle";
-    if (xTaskCreatePinnedToCore(player_task,
-                                "screen_roboeyes",
-                                SCREEN_TASK_STACK,
-                                NULL,
-                                SCREEN_TASK_PRIORITY,
-                                &s_player_task,
-                                1) != pdPASS) {
-        s_status.last_error = "task_create_failed";
-        return ESP_ERR_NO_MEM;
+    esp_err_t ret = screen_player_fill_rgb565(0x0000);
+    if (ret != ESP_OK) {
+        s_status.last_error = "screen_clear_failed";
+        return ret;
     }
 
+    ret = screen_roboeyes_begin_expression("normal");
+    if (ret != ESP_OK) {
+        s_status.last_error = "roboeyes_begin_failed";
+        return ret;
+    }
+
+    s_status.playing = true;
+    s_status.active_asset = SCREEN_ROBOEYES_ASSET;
+    s_status.last_error = NULL;
+    ret = screen_player_start_tick_task();
+    if (ret != ESP_OK) {
+        s_status.playing = false;
+        s_status.last_error = "screen_tick_task_failed";
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "FluxGarage RoboEyes animation active: %dx%d QSPI",
+             SCREEN_PLAYER_WIDTH,
+             SCREEN_PLAYER_HEIGHT);
     return ESP_OK;
+}
+
+esp_err_t screen_player_tick(void)
+{
+    if (!s_status.enabled || !s_status.initialized || !s_status.playing) {
+        return ESP_OK;
+    }
+
+    esp_err_t ret = screen_roboeyes_update();
+    if (ret != ESP_OK) {
+        screen_player_report_frame(ret, 0, "roboeyes_update_failed");
+    }
+    return ret;
 }
 
 esp_err_t screen_player_status(screen_player_status_t *out)

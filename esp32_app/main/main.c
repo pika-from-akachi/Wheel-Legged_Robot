@@ -17,7 +17,7 @@
 
 static const char *TAG = "WHEEL_MAIN";
 
-static void preset_screen_backlight_off(void)
+static void preset_screen_backlight_on(void)
 {
     wheel_bsp_screen_config_t screen = wheel_bsp_screen_config();
     if (screen.backlight_gpio < 0) {
@@ -37,15 +37,15 @@ static void preset_screen_backlight_off(void)
         return;
     }
 
-    gpio_set_level(screen.backlight_gpio, screen.backlight_active_high ? 0 : 1);
-    ESP_LOGI(TAG, "screen backlight held off before panel init: gpio=%d active_%s",
+    gpio_set_level(screen.backlight_gpio, screen.backlight_active_high ? 1 : 0);
+    ESP_LOGI(TAG, "screen backlight preset on: gpio=%d active_%s",
              screen.backlight_gpio,
              screen.backlight_active_high ? "high" : "low");
 }
 
 void app_main(void)
 {
-    preset_screen_backlight_off();
+    preset_screen_backlight_on();
 
     ESP_LOGI(TAG, "Wheel-Legged Robot ESP32-S3 auxiliary runtime v1.0");
 
