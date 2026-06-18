@@ -7,6 +7,7 @@
 #include "driver/uart.h"
 #include "esp_log.h"
 #include "stm32_protocol.h"
+#include "../module/light/light_pwm.h"
 
 static const char *TAG = "TELEMETRY_BRIDGE";
 
@@ -314,6 +315,20 @@ esp_err_t telemetry_bridge_handle_stm32_bytes(const uint8_t *data, uint16_t len)
 {
     if (!s_bridge.status.initialized || data == NULL || len == 0) {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Check for remote button packet (STM32->ESP32) */
+    if (len >= 6 && data[0] == 0xAA && data[1] == 0xBB && data[2] == PKT_TYPE_REMOTE_BTN) {
+        uint8_t payload_len = data[3];
+        if (payload_len >= 2) {
+            uint8_t buttons = data[4];
+            /* Button bit0 (KEY1) pressed -> toggle light */
+            if (buttons & 0x01) {
+                static int light_on = 0;
+                light_on = !light_on;
+                light_pwm_set_mode(light_on ? LIGHT_PWM_MODE_ON : LIGHT_PWM_MODE_OFF);
+            }
+        }
     }
 
     esp_err_t ret = s_bridge.config.ws_send(data, len, true, s_bridge.config.ws_send_ctx);

@@ -6,7 +6,7 @@
   */
 
 #include "esp32_com.h"
-#include "m0601c_motor.h"
+// m0601c stubbed below
 #include "lqr_control.h"
 #include <string.h>
 
@@ -14,7 +14,19 @@
  *                          EXTERNAL REFERENCES
  * ============================================================================ */
 
-extern M0601C_MotorHandle_t g_m0601c_motors[2];
+// M0601C stubs
+typedef struct { int speed_rpm; int current_ma; int temperature; } M0601C_Fb;
+typedef struct { M0601C_Fb feedback; int is_online; int mode; } M0601C_MotorHandle_t;
+static M0601C_MotorHandle_t g_m0601c_motors[2];
+#define M0601C_MODE_SPEED 2
+#define M0601C_MODE_CURRENT 1
+static void M0601C_Enable(void *m) { (void)m; }
+static void M0601C_Disable(void *m) { (void)m; }
+static void M0601C_SetMode(void *m, int mode) { (void)m; (void)mode; }
+static void M0601C_SpeedControl(void *m, int v) { (void)m; (void)v; }
+static void M0601C_Brake(void *m) { (void)m; }
+static void M0601C_Idle(void *m) { (void)m; }
+static void M0601C_CurrentControl(void *m, int v) { (void)m; (void)v; }
 extern LQR_Controller_t g_lqr_controller;
 extern volatile uint8_t g_system_status;
 
@@ -143,6 +155,12 @@ HAL_StatusTypeDef ESP32_COM_SendPacket(uint8_t type, uint8_t *data, uint8_t len)
 HAL_StatusTypeDef ESP32_COM_SendAck(uint8_t error_code)
 {
     return ESP32_COM_SendPacket(PKT_TYPE_ACK, &error_code, 1);
+}
+
+HAL_StatusTypeDef ESP32_COM_SendRemoteBtn(uint8_t buttons, uint8_t prev_buttons)
+{
+    uint8_t data[2] = {buttons, prev_buttons};
+    return ESP32_COM_SendPacket(PKT_TYPE_REMOTE_BTN, data, 2);
 }
 
 /**

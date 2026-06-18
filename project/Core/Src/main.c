@@ -33,7 +33,7 @@
 //#include "m0601c_motor.h"   // disabled — not in build
 #include "lqr_control.h"
 #include "robot_model.h"
-//#include "esp32_com.h"      // disabled — not in build
+#include "esp32_com.h"      // disabled — not in build
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -263,9 +263,9 @@ int main(void)
   MOTOR_StartReceive();
 
   /* ===== ESP32 Communication (USART3) — DISABLED ===== */
-  //MX_USART3_UART_Init();
-  //ESP32_COM_Init(&huart3);
-  //ESP32_COM_StartRx();
+  MX_USART3_UART_Init();
+  ESP32_COM_Init(&huart3);
+  ESP32_COM_StartRx();
 
   // ===== LQR init =====
   extern LQR_Controller_t g_lqr_controller;
@@ -465,7 +465,13 @@ void USART2_IRQHandler(void)
  */
 void USART3_IRQHandler(void)
 {
-    /* UART not initialized — should never fire */
+    if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_RXNE)) {
+        uint8_t byte = (uint8_t)(huart3.Instance->DR & 0xFF);
+        ESP32_COM_UART_IRQHandler(byte);
+    }
+    if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_ORE)) {
+        __HAL_UART_CLEAR_OREFLAG(&huart3);
+    }
 }
 /* USER CODE END 4 */
 

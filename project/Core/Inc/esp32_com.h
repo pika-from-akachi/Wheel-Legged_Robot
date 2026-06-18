@@ -60,6 +60,7 @@ extern "C" {
 #define PKT_TYPE_SET_SPEED          0x07    /**< Set target speed */
 #define PKT_TYPE_SET_POSITION       0x08    /**< Set target joint positions */
 #define PKT_TYPE_M0601C_CMD        0x09    /**< M0601C-specific command (accTime/brake) */
+#define PKT_TYPE_REMOTE_BTN        0x10    /**< Remote controller button event */
 #define PKT_TYPE_SYS_RESET          0x20    /**< System reset command */
 #define PKT_TYPE_FW_VERSION         0x30    /**< Request firmware version */
 
@@ -148,6 +149,7 @@ void ESP32_COM_StartRx(void);
 
 /* Packet building / sending */
 HAL_StatusTypeDef ESP32_COM_SendPacket(uint8_t type, uint8_t *data, uint8_t len);
+HAL_StatusTypeDef ESP32_COM_SendRemoteBtn(uint8_t buttons, uint8_t prev_buttons);
 HAL_StatusTypeDef ESP32_COM_SendAck(uint8_t error_code);
 HAL_StatusTypeDef ESP32_COM_SendStateData(void);
 HAL_StatusTypeDef ESP32_COM_SendMotorFeedback(uint8_t motor_id);

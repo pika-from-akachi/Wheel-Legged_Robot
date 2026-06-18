@@ -24,6 +24,7 @@
 #include "el05_motor.h"
 #include "lqr_control.h"
 #include "robot_model.h"
+#include "esp32_com.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -884,6 +885,14 @@ void Task_Remote(void *argument)
 
             osMessageQueuePut(queue_RemoteData, &remoteData, 0, 0);
             osSemaphoreRelease(sem_Remote_Ready);
+            /* 检测遥控按钮按下,发送到ESP32 */
+            {
+                static uint8_t prev_btns = 0;
+                if (remoteData.buttons != prev_btns && remoteData.buttons != 0) {
+                    ESP32_COM_SendRemoteBtn(remoteData.buttons, prev_btns);
+                }
+                prev_btns = remoteData.buttons;
+            }
 
             g_remote_update_count++;
         }
