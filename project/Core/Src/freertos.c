@@ -102,7 +102,7 @@ LQR_Controller_t g_lqr_controller;
 LQR_TuningParams_t g_lqr_tuning;
 RobotState_t g_robot_state;
 volatile uint8_t g_balance_enabled = 0;
-volatile float g_accel_offset = -0.015f;  /* IMU校准: 0.00589 rad */
+volatile float g_accel_offset = 3.14159f;  /* π for Z-up IMU */  /* IMU校准: 0.00589 rad */
 volatile float g_gyro_bias = 0.0f;   /* 陀螺仪零偏(rad/s) */
 volatile float debug_lqr_body_angle = 0.0f;
 
@@ -442,7 +442,7 @@ void Task_EL05_Motor(void *argument)
             sum_g += (float)r.gyro_x / 16.4f;  /* raw dps */
             osDelay(2);
         }
-        g_accel_offset = sum_a / 50.0f;
+        //g_accel_offset = sum_a / 50.0f;  /* 已硬编码为π, 跳过硬标注 */
         g_gyro_bias = (sum_g / 50.0f) * 0.017453f;  /* 平均零偏 → rad/s */
     }
 
@@ -770,15 +770,15 @@ void Task_Balance(void *argument)
         float az = (float)raw.accel_z * 0.488f / 1000.0f;
         float gx = (float)raw.gyro_x / 16.4f;
 
-        /* Z朝上IMU: atan2(ay,az)直立=π, 前倾=π-θ, 后倾=-π+θ.
-         *   body_angle_raw = -(diff): 前倾>0, 后倾<0 */
+        /* X/Z翻转后(Z-down): atan2(ay,az)直立=0, 前倾为负,后倾为正.
+         *   body_angle_raw = -atan2: 前倾>0, 后倾<0 */
         float accel_angle = atan2f(ax, az);
         float angle_diff = accel_angle - g_accel_offset;
         if (angle_diff > 3.14159f) angle_diff -= 2.0f * 3.14159f;
         else if (angle_diff < -3.14159f) angle_diff += 2.0f * 3.14159f;
         float body_angle_raw = -angle_diff;
 
-        /* Gyro: rad/s, 减零偏. Z朝上:前倾gyro_x<0,取反使与body_angle同号 */
+        /* Gyro: rad/s, 减零偏. 取反使与body_angle同号 */
         float gyro_rate = -(gx * 0.017453f - g_gyro_bias);
 
         /* Complementary filter: 90% gyro + 10% accel */
