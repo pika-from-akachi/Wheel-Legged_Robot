@@ -281,6 +281,16 @@ HAL_StatusTypeDef MOTOR_SetSpeed(uint8_t motorId, int16_t rpm)
 }
 
 /**
+ * @brief  电流环控制（需先切换到电流模式）
+ * @param  motorId     : 电机 ID 号，范围 1~4
+ * @param  current_raw : 电流给定值，-32767~32767
+ */
+HAL_StatusTypeDef MOTOR_SetCurrent(uint8_t motorId, int16_t current_raw)
+{
+    return MOTOR_SendDriveCmd(motorId, current_raw, MOTOR_ACC_DEFAULT, MOTOR_BRAKE_DISABLE);
+}
+
+/**
  * @brief  电机刹车（仅在速度环模式下有效）
  * @note   发送速度=0、刹车=0xFF 的驱动指令
  */

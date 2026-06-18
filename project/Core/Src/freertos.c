@@ -22,6 +22,8 @@
 #include "freertos_tasks.h"
 #include "motor_driver.h"
 #include "el05_motor.h"
+#include "lqr_control.h"
+#include "robot_model.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -93,6 +95,32 @@ volatile uint32_t g_can_rx_count = 0;
 
 /* External motor handles (array of 4 joint motors, IDs 1-4) */
 extern EL05_MotorHandle_t g_el05_motors[4];
+
+/* ===== LQR Balance variables ===== */
+LQR_Controller_t g_lqr_controller;
+LQR_TuningParams_t g_lqr_tuning;
+RobotState_t g_robot_state;
+volatile uint8_t g_balance_enabled = 0;
+volatile float g_accel_offset = -0.015f;  /* IMU校准: 0.00589 rad */
+volatile float g_gyro_bias = 0.0f;   /* 陀螺仪零偏(rad/s) */
+volatile float debug_lqr_body_angle = 0.0f;
+
+/* ===== 数据日志缓冲区 (2500条, 每5次控制循环写一条) ===== */
+#define LOG_SIZE 2500
+#define LOG_DECIMATE 5
+typedef struct {
+    uint32_t tick;
+    float    ay; float az; float gx;
+    float    angle; float rate;
+    float    torque;
+} LogEntry_t;
+volatile LogEntry_t g_log[LOG_SIZE];
+volatile uint32_t g_log_idx = 0;
+volatile float debug_lqr_wheel_torque = 0.0f;
+volatile float debug_lqr_current_raw = 0.0f;
+volatile uint8_t debug_lqr_enabled = 0;
+volatile int16_t g_motor_test_cur = 0;
+volatile uint8_t g_calibrate_zero = 0;  /* 设1标定当前姿态为平衡零点 */   /* 非0时覆盖LQR输出,直接设电流 */
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -209,15 +237,15 @@ void MX_FREERTOS_Init(void) {
   }
 #endif
 
-  /* Balance control task (500Hz) — DISABLED for motor test */
-  //{
-  //  const osThreadAttr_t attr = {
-  //    .name = "Balance_Task",
-  //    .stack_size = 4096,
-  //    .priority = (osPriority_t) osPriorityAboveNormal2,
-  //  };
-  //  taskHandle_Balance = osThreadNew(Task_Balance, NULL, &attr);
-  //}
+  /* Balance control task */
+  {
+    const osThreadAttr_t attr = {
+      .name = "Balance_Task",
+      .stack_size = 4096,
+      .priority = (osPriority_t) osPriorityAboveNormal2,
+    };
+    taskHandle_Balance = osThreadNew(Task_Balance, NULL, &attr);
+  }
 
   /* System monitor task (10Hz) */
   {
@@ -394,21 +422,33 @@ void Task_EL05_Motor(void *argument)
     }
     osDelay(4000);
 
-    /* Step 4: 启动轮毂电机 ID1(左腿) + ID2(右腿) (M0601C, RS485) */
-    #define WHEEL_SPEED  50   /* 50 RPM (±) */
-    /* 左腿正转, 右腿反转 → 机器人向前运动 */
+    /* Step 4: 切换到速度模式, 启动平衡 */
     osMutexAcquire(mutex_UART1, osWaitForever);
-    MOTOR_SendModeSwitchCmd(1, MOTOR_CTRL_SPEED);
-    MOTOR_SendModeSwitchCmd(2, MOTOR_CTRL_SPEED);
-    osMutexRelease(mutex_UART1);    osDelay(20);
-    osMutexAcquire(mutex_UART1, osWaitForever);
-    debug_wheel_cmd_status   = (MOTOR_SetSpeed(1,  WHEEL_SPEED) == HAL_OK) ? 1 : 2;
+    MOTOR_SendModeSwitchCmd(1, MOTOR_CTRL_CURRENT);
+    MOTOR_SendModeSwitchCmd(2, MOTOR_CTRL_CURRENT);
     osMutexRelease(mutex_UART1);
-    osMutexAcquire(mutex_UART1, osWaitForever);
-    debug_right_wheel_status = (MOTOR_SetSpeed(2, -WHEEL_SPEED) == HAL_OK) ? 1 : 2;
-    osMutexRelease(mutex_UART1);
+    osDelay(20);
 
-    /* Step 5: 10Hz循环保持 — 关节电机最小腿高 + 轮毂电机持续转动 */
+    /* IMU零点校准: 等500ms后读50次平均 (accel offset + gyro bias) */
+    {
+        osDelay(500);
+        float sum_a = 0.0f, sum_g = 0.0f;
+        for (int i = 0; i < 50; i++) {
+            ICM42688_RawData_t r = IMU_GetLatestRawData();
+            float ay = (float)r.accel_y * 0.488f / 1000.0f;
+            float az = (float)r.accel_z * 0.488f / 1000.0f;
+            sum_a += atan2f(ay, az);
+            sum_g += (float)r.gyro_x / 16.4f;  /* raw dps */
+            osDelay(2);
+        }
+        g_accel_offset = sum_a / 50.0f;
+        g_gyro_bias = (sum_g / 50.0f) * 0.017453f;  /* 平均零偏 → rad/s */
+    }
+
+    LQR_Enable(&g_lqr_controller);
+    g_balance_enabled = 1;
+
+    /* Step 5: 10Hz循环保持 — 关节电机最小腿高(动作组0) */
     tick = osKernelGetTickCount();
     for (;;) {
         for (int i = 0; i < 4; i++) {
@@ -418,11 +458,6 @@ void Task_EL05_Motor(void *argument)
             osMutexRelease(mutex_CAN);
             debug_targets[i] = g_action0[i];
         }
-        /* 保持轮毂电机转速: 左腿+50RPM, 右腿-50RPM */
-        osMutexAcquire(mutex_UART1, osWaitForever);
-        debug_wheel_cmd_status   = (MOTOR_SetSpeed(1,  WHEEL_SPEED) == HAL_OK) ? 1 : 2;
-        debug_right_wheel_status = (MOTOR_SetSpeed(2, -WHEEL_SPEED) == HAL_OK) ? 1 : 2;
-        osMutexRelease(mutex_UART1);
 
         debug_m1_fb_pos   = g_el05_motors[0].feedback.position;
         debug_m1_fb_fault = g_el05_motors[0].feedback.fault;
@@ -686,40 +721,135 @@ void Task_IMU(void *argument)
     }
 }
 
-#if 0  // DISABLED for motor test
 /**
-  * @brief Balance control task (high priority, 500Hz)
+  * @brief Balance control task
+  * @note  IMU mounting: Y forward, X right, Z up (标准安装)
+  *        前倾时: body_angle>0, u[1]=-Kx → K[1][0]<0为正确负反馈
+  *        Complementary filter: 95% gyro + 5% accel
+  *        Mapping: LEFT=+cur(forward), RIGHT=-cur(forward mirror)
   */
 void Task_Balance(void *argument)
 {
-    IMU_Data_t imuData;
-    MotorCmd_t motorCmd;
     uint32_t tick_start;
-    osStatus_t status;
-
     (void)argument;
+
+    #define WHEEL_ID_LEFT   1
+    #define WHEEL_ID_RIGHT  2
+    BalanceState_t balance_state;
+
+    /* Wait for homing to complete */
+    while (!g_balance_enabled) {
+        osDelay(100);
+    }
+
+    /* Current mode init */
+    osMutexAcquire(mutex_UART1, osWaitForever);
+    MOTOR_SendModeSwitchCmd(WHEEL_ID_LEFT, MOTOR_CTRL_CURRENT);
+    MOTOR_SendModeSwitchCmd(WHEEL_ID_RIGHT, MOTOR_CTRL_CURRENT);
+    osMutexRelease(mutex_UART1);
+    osDelay(50);
+
+    /* g_accel_offset 已硬编码为校准值 */
+
+    /* 陀螺零偏设为0(互补滤波自动收敛,防标定期间运动干扰) */
+    g_gyro_bias = 0.0f;
 
     tick_start = osKernelGetTickCount();
 
     for (;;) {
-        status = osMessageQueueGet(queue_IMUData, &imuData, NULL, 2);
+        /* Read IMU raw data from ISR double buffer */
+        ICM42688_RawData_t raw = IMU_GetLatestRawData();
+        /* 标定: g_calibrate_zero=1时记录当前姿态为平衡零点 */
+        if (g_calibrate_zero) {
+            float ca = atan2f((float)raw.accel_y * 0.488f / 1000.0f, (float)raw.accel_z * 0.488f / 1000.0f);
+            g_accel_offset = ca;
+            g_calibrate_zero = 0;
+        }
+        float ax = (float)raw.accel_y * 0.488f / 1000.0f;
+        float az = (float)raw.accel_z * 0.488f / 1000.0f;
+        float gx = (float)raw.gyro_x / 16.4f;
 
-        if (status == osOK) {
-            motorCmd.motor_id = 1;
-            motorCmd.position = 0.0f;
-            motorCmd.velocity = 0.0f;
-            motorCmd.torque = 0.0f;
-            motorCmd.mode = 0;
-            motorCmd.timestamp = osKernelGetTickCount();
+        /* Z朝上IMU: atan2(ay,az)直立=π, 前倾=π-θ, 后倾=-π+θ.
+         *   body_angle_raw = -(diff): 前倾>0, 后倾<0 */
+        float accel_angle = atan2f(ax, az);
+        float angle_diff = accel_angle - g_accel_offset;
+        if (angle_diff > 3.14159f) angle_diff -= 2.0f * 3.14159f;
+        else if (angle_diff < -3.14159f) angle_diff += 2.0f * 3.14159f;
+        float body_angle_raw = -angle_diff;
 
-            osMessageQueuePut(queue_MotorCmd, &motorCmd, 0, 0);
+        /* Gyro: rad/s, 减零偏. Z朝上:前倾gyro_x<0,取反使与body_angle同号 */
+        float gyro_rate = -(gx * 0.017453f - g_gyro_bias);
+
+        /* Complementary filter: 90% gyro + 10% accel */
+        static float cf_angle = 0.0f;
+        static uint32_t last_t = 0;
+        uint32_t now_t = osKernelGetTickCount();
+        float dt = (now_t - last_t) * 0.001f;
+        if (dt > 0.001f && dt < 0.05f) {
+            cf_angle = 0.90f * (cf_angle + gyro_rate * dt) + 0.10f * body_angle_raw;
+        }
+        /* 首次dt很大: 保持cf_angle初始值(0),不重置到body_angle_raw(运动污染) */
+        last_t = now_t;
+
+        /* Gyro LPF for D term */
+        static float g_lpf = 0.0f;
+        if (g_lpf == 0.0f) g_lpf = gyro_rate;
+        g_lpf += (gyro_rate - g_lpf) * 0.1f;
+
+        /* LQR state */
+        balance_state.body_angle = cf_angle;
+        balance_state.body_rate = gyro_rate;
+        /* 轮位估算: 从扭矩积分 */
+        /* wheel pos estimation removed */
+        
+        
+        
+        
+        /* 轮速反馈: 从电机读取RPM,转rad/s,用于阻尼漂移 */
+        MotorStatus_t *ms = MOTOR_GetStatus();
+        float wheel_spd = (ms && ms->isValid) ? ms->speed * 0.10472f : 0.0f;
+        balance_state.wheel_velocity = wheel_spd;
+        balance_state.wheel_position = 0.0f;
+        balance_state.wheel_position = 0.0f;
+        balance_state.wheel_velocity = 0.0f;
+        LQR_Update(&g_lqr_controller, &balance_state, dt);
+
+        /* Current mode output + 重心偏后补偿 */
+        float torque = g_lqr_controller.u[1];
+        if (torque > -0.02f && torque < 0.02f) torque = 0.0f;
+        int16_t cur = (int16_t)(torque * 27306.0f);
+        if (cur > 32767) cur = 32767; if (cur < -32767) cur = -32767;
+
+        /* 电机方向测试: g_motor_test_cur非0时覆盖输出 */
+        if (g_motor_test_cur != 0) {
+            cur = g_motor_test_cur;
         }
 
-        osDelayUntil(tick_start + 2);
-        tick_start += 2;
+        osMutexAcquire(mutex_UART1, osWaitForever);
+        MOTOR_SetCurrent(WHEEL_ID_LEFT, cur);
+        MOTOR_SetCurrent(WHEEL_ID_RIGHT, -cur);
+        osMutexRelease(mutex_UART1);
+
+        /* Log */
+        { static uint32_t log_cnt = 0;
+          if (++log_cnt % LOG_DECIMATE == 0) {
+            uint32_t li = g_log_idx++ % LOG_SIZE;
+            g_log[li].tick  = uwTick;
+            g_log[li].ay    = ax; g_log[li].az = az; g_log[li].gx = gx;
+            g_log[li].angle = cf_angle; g_log[li].rate = g_lpf;
+            g_log[li].torque= torque;
+        } }
+
+        /* Debug */
+        debug_lqr_body_angle = cf_angle;
+        debug_lqr_wheel_torque = torque;
+        debug_lqr_current_raw = (float)cur;
+        debug_lqr_enabled = 1;
+
+        osDelayUntil(tick_start + 5);  /* 200Hz */
+        tick_start += 5;
     }
 }
-#endif /* DISABLED for motor test */
 
 /**
   * @brief Remote control task (100Hz)
