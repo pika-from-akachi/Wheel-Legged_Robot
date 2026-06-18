@@ -339,7 +339,7 @@ static void uart_to_ws_task(void *arg)
             telemetry_bridge_handle_stm32_bytes(data, (uint16_t)len);
         }
         wheel_app_tick();
-        taskYIELD();
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -349,7 +349,7 @@ esp_err_t web_server_start(void)
     wifi_init_ap();
     uart_stm_init();
     start_http_server();
-    xTaskCreate(uart_to_ws_task, "uart_ws", 4096, NULL, 5, NULL);
+    xTaskCreatePinnedToCore(uart_to_ws_task, "uart_ws", 4096, NULL, 5, NULL, 0);
     return ESP_OK;
 }
 

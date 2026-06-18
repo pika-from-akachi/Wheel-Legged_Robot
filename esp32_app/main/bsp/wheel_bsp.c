@@ -49,7 +49,7 @@ wheel_bsp_pwm_output_config_t wheel_bsp_light_pwm_config(void)
 wheel_bsp_screen_config_t wheel_bsp_screen_config(void)
 {
     return (wheel_bsp_screen_config_t) {
-        .enabled = false,
+        .enabled = true,
         .spi_host = SPI2_HOST,
         .pixel_clock_hz = 50 * 1000 * 1000,
         .sck_gpio = 12,

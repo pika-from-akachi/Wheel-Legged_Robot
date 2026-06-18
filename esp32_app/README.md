@@ -23,21 +23,16 @@ Keep feature modules under `main/module/<feature>/` with their `.c` and `.h`
 files together. Shared board-level pin and peripheral defaults belong in
 `main/bsp/`, while protocol/network code should stay outside feature modules.
 
-## Round TFT Video
+## Round TFT RoboEyes
 
-The ST77916 360x360 round TFT is driven over QSPI. Boot and loop animations are
-stored in SPIFFS as WVJ files generated from the source MOV files:
+The ST77916 360x360 round TFT is driven over QSPI. After panel init and a short
+settle delay, firmware renders a startup reveal and then hands expression timing
+to the external FluxGarage RoboEyes library.
+
+The build pins RoboEyes to `b42f8e596535234932be3514ac7a813d4ced0046`. By
+default CMake clones it under `build/_deps/`; for offline builds, point CMake at
+an existing checkout:
 
 ```bash
-python3 esp32_app/tools/convert_screen_video.py
+idf.py -DROBOEYES_SOURCE_DIR="/path/to/FluxGarage RoboEyes" build
 ```
-
-Useful tuning options:
-
-```bash
-python3 esp32_app/tools/convert_screen_video.py --fps 15 --quality 8
-python3 esp32_app/tools/convert_screen_video.py --fps 18 --quality 10
-```
-
-Higher `--fps` is smoother but costs more decode time and flash space. Higher
-`--quality` values in ffmpeg `-q:v` make smaller JPEG frames.

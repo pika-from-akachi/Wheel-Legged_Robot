@@ -1,8 +1,6 @@
 #include "screen_player.h"
 
-#include <errno.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -10,16 +8,14 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_memory_utils.h"
-#include "esp_spiffs.h"
-#include "esp_timer.h"
-#include "esp32s3/rom/tjpgd.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "screen_roboeyes.h"
 
 #define ST77916_CMD_SWRESET 0x01
 #define ST77916_CMD_SLPOUT  0x11
 #define ST77916_CMD_NORON   0x13
-#define ST77916_CMD_INVON   0x21
+#define ST77916_CMD_INVOFF  0x20
 #define ST77916_CMD_DISPON  0x29
 #define ST77916_CMD_CASET   0x2A
 #define ST77916_CMD_RASET   0x2B
@@ -35,126 +31,20 @@
 #define ST77916_CMD_RESSET3 0xD2
 
 #define ST77916_QSPI_WRITE 0x32
-#define ST77916_SPI_MAX_TRANSFER_BYTES (SCREEN_PLAYER_WIDTH * 80 * 2)
+#define ST77916_SPI_MAX_TRANSFER_BYTES (16 * 1024)
 #define SCREEN_FILL_ROWS 20
-
-#define SCREEN_VIDEO_MAGIC 0x314A5657u /* WVJ1 */
-#define SCREEN_VIDEO_HEADER_SIZE 32u
-#define SCREEN_VIDEO_FRAME_HEADER_SIZE 8u
-#define SCREEN_VIDEO_MAX_JPEG_BYTES (220 * 1024)
-#define SCREEN_VIDEO_TJPG_WORK_BYTES (32 * 1024)
-#define SCREEN_VIDEO_TASK_STACK 9216
-#define SCREEN_VIDEO_TASK_PRIORITY 4
-
-typedef struct {
-    uint32_t magic;
-    uint16_t version;
-    uint16_t header_size;
-    uint16_t width;
-    uint16_t height;
-    uint16_t fps;
-    uint16_t flags;
-    uint32_t frame_count;
-    uint32_t frame_table_offset;
-    uint32_t data_offset;
-    uint32_t reserved;
-} screen_video_header_t;
-
-typedef struct {
-    const uint8_t *jpeg_data;
-    uint32_t jpeg_size;
-    uint32_t offset;
-    uint32_t bytes_left;
-    uint8_t *framebuffer;
-    uint32_t stride_bytes;
-} jpeg_decode_context_t;
+#define SCREEN_TASK_STACK 12288
+#define SCREEN_TASK_PRIORITY 4
+#define SCREEN_BOOT_SETTLE_MS 650
+#define SCREEN_ROBOEYES_ASSET "roboeyes_normal"
 
 static const char *TAG = "SCREEN_PLAYER";
+
 static screen_player_status_t s_status;
 static screen_player_config_t s_config;
 static spi_device_handle_t s_lcd_spi;
-static uint8_t *s_framebuffer;
-static uint8_t *s_jpeg_buffer;
-static uint8_t *s_tjpg_work;
+static uint8_t *s_spi_tx_buffer;
 static TaskHandle_t s_player_task;
-static char s_boot_path[64];
-static char s_loop_path[64];
-
-static esp_err_t mount_spiffs_if_needed(void);
-
-static esp_err_t ensure_video_resources(void)
-{
-    esp_err_t ret = mount_spiffs_if_needed();
-    if (ret != ESP_OK) {
-        s_status.last_error = "spiffs_mount_failed";
-        return ret;
-    }
-
-    if (s_framebuffer == NULL) {
-        s_framebuffer = heap_caps_malloc(SCREEN_PLAYER_WIDTH * SCREEN_PLAYER_HEIGHT * 2U,
-                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (s_framebuffer == NULL) {
-            s_framebuffer = heap_caps_malloc(SCREEN_PLAYER_WIDTH * SCREEN_PLAYER_HEIGHT * 2U,
-                                             MALLOC_CAP_8BIT);
-        }
-    }
-    if (s_tjpg_work == NULL) {
-        s_tjpg_work = heap_caps_malloc(SCREEN_VIDEO_TJPG_WORK_BYTES, MALLOC_CAP_8BIT);
-    }
-    if (s_jpeg_buffer == NULL) {
-        s_jpeg_buffer = heap_caps_malloc(SCREEN_VIDEO_MAX_JPEG_BYTES,
-                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (s_jpeg_buffer == NULL) {
-            s_jpeg_buffer = heap_caps_malloc(SCREEN_VIDEO_MAX_JPEG_BYTES,
-                                             MALLOC_CAP_8BIT);
-        }
-    }
-
-    if (s_framebuffer == NULL || s_jpeg_buffer == NULL || s_tjpg_work == NULL) {
-        s_status.last_error = "no_memory";
-        return ESP_ERR_NO_MEM;
-    }
-
-    return ESP_OK;
-}
-
-static uint16_t read_le16(const uint8_t *p)
-{
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
-
-static uint32_t read_le32(const uint8_t *p)
-{
-    return (uint32_t)p[0] |
-           ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) |
-           ((uint32_t)p[3] << 24);
-}
-
-static bool read_exact(FILE *file, void *out, size_t len)
-{
-    return fread(out, 1, len, file) == len;
-}
-
-static esp_err_t mount_spiffs_if_needed(void)
-{
-    if (esp_spiffs_mounted(NULL)) {
-        return ESP_OK;
-    }
-
-    const esp_vfs_spiffs_conf_t conf = {
-        .base_path = "/www",
-        .partition_label = NULL,
-        .max_files = 8,
-        .format_if_mount_failed = false,
-    };
-
-    esp_err_t ret = esp_vfs_spiffs_register(&conf);
-    if (ret == ESP_ERR_INVALID_STATE && esp_spiffs_mounted(NULL)) {
-        return ESP_OK;
-    }
-    return ret;
-}
 
 static esp_err_t lcd_qspi_write(uint8_t cmd, const void *data, size_t len)
 {
@@ -165,17 +55,31 @@ static esp_err_t lcd_qspi_write(uint8_t cmd, const void *data, size_t len)
         return ESP_ERR_INVALID_ARG;
     }
 
+    const bool data_in_psram = data != NULL && esp_ptr_external_ram(data);
+    if (data_in_psram && s_spi_tx_buffer == NULL) {
+        s_spi_tx_buffer = heap_caps_malloc(ST77916_SPI_MAX_TRANSFER_BYTES,
+                                           MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+        if (s_spi_tx_buffer == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
     ESP_RETURN_ON_ERROR(spi_device_acquire_bus(s_lcd_spi, portMAX_DELAY), TAG, "acquire lcd spi bus failed");
 
     size_t offset = 0;
     bool first = true;
-    const bool data_in_psram = data != NULL && esp_ptr_external_ram(data);
     esp_err_t ret = ESP_OK;
 
     do {
         size_t chunk_size = len - offset;
         if (chunk_size > ST77916_SPI_MAX_TRANSFER_BYTES) {
             chunk_size = ST77916_SPI_MAX_TRANSFER_BYTES;
+        }
+
+        const uint8_t *chunk = chunk_size > 0 ? (const uint8_t *)data + offset : NULL;
+        if (data_in_psram && chunk_size > 0) {
+            memcpy(s_spi_tx_buffer, chunk, chunk_size);
+            chunk = s_spi_tx_buffer;
         }
 
         spi_transaction_ext_t trans = {0};
@@ -185,13 +89,10 @@ static esp_err_t lcd_qspi_write(uint8_t cmd, const void *data, size_t len)
         trans.base.cmd = ST77916_QSPI_WRITE;
         trans.base.addr = ((uint32_t)cmd << 8);
         trans.base.length = chunk_size * 8U;
-        trans.base.tx_buffer = chunk_size > 0 ? (const uint8_t *)data + offset : NULL;
+        trans.base.tx_buffer = chunk;
 
         if (chunk_size > 0) {
             trans.base.flags |= SPI_TRANS_MODE_QIO;
-            if (data_in_psram) {
-                trans.base.flags |= SPI_TRANS_DMA_USE_PSRAM;
-            }
         }
 
         const bool last = (offset + chunk_size) >= len;
@@ -290,7 +191,7 @@ static esp_err_t lcd_init_backlight(void)
         .intr_type = GPIO_INTR_DISABLE,
     };
     ESP_RETURN_ON_ERROR(gpio_config(&io_conf), TAG, "backlight gpio config failed");
-    return lcd_backlight_set(true);
+    return lcd_backlight_set(false);
 }
 
 static esp_err_t lcd_init_panel(void)
@@ -317,7 +218,7 @@ static esp_err_t lcd_init_panel(void)
     ESP_RETURN_ON_ERROR(lcd_tx_cmd(ST77916_CMD_TEOFF), TAG, "TE off failed");
     ESP_RETURN_ON_ERROR(lcd_tx_param(ST77916_CMD_WRDISBV, &brightness, 1), TAG, "brightness failed");
     ESP_RETURN_ON_ERROR(lcd_tx_param(ST77916_CMD_WRCTRLD, &ctrl_display, 1), TAG, "display ctrl failed");
-    ESP_RETURN_ON_ERROR(lcd_tx_cmd(ST77916_CMD_INVON), TAG, "invert on failed");
+    ESP_RETURN_ON_ERROR(lcd_tx_cmd(ST77916_CMD_INVOFF), TAG, "invert off failed");
     ESP_RETURN_ON_ERROR(lcd_tx_cmd(ST77916_CMD_SLPOUT), TAG, "sleep out failed");
     vTaskDelay(pdMS_TO_TICKS(120));
     ESP_RETURN_ON_ERROR(lcd_tx_cmd(ST77916_CMD_NORON), TAG, "normal on failed");
@@ -385,223 +286,56 @@ esp_err_t screen_player_fill_rgb565(uint16_t rgb565)
     return ret;
 }
 
-static UINT jpeg_input_func(JDEC *jd, BYTE *buff, UINT nbyte)
+void screen_player_report_frame(esp_err_t ret, uint32_t elapsed_us, const char *error)
 {
-    jpeg_decode_context_t *input = (jpeg_decode_context_t *)jd->device;
-    UINT to_read = nbyte;
-    if (to_read > input->bytes_left) {
-        to_read = input->bytes_left;
+    s_status.last_frame_us = elapsed_us;
+    if (ret == ESP_OK) {
+        s_status.frames_rendered++;
+        s_status.last_error = NULL;
+        return;
     }
 
-    if (buff == NULL) {
-        input->offset += to_read;
-    } else {
-        memcpy(buff, input->jpeg_data + input->offset, to_read);
-        input->offset += to_read;
-    }
-    input->bytes_left -= to_read;
-    return to_read;
-}
-
-static UINT jpeg_output_func(JDEC *jd, void *bitmap, JRECT *rect)
-{
-    jpeg_decode_context_t *out = (jpeg_decode_context_t *)jd->device;
-    const int rect_w = (int)rect->right - (int)rect->left + 1;
-    const int rect_h = (int)rect->bottom - (int)rect->top + 1;
-    const uint8_t *src = (const uint8_t *)bitmap;
-
-    if (rect_w <= 0 || rect_h <= 0 ||
-        rect->right >= SCREEN_PLAYER_WIDTH ||
-        rect->bottom >= SCREEN_PLAYER_HEIGHT) {
-        return 0;
-    }
-
-    for (int row = 0; row < rect_h; row++) {
-        uint8_t *dst = out->framebuffer +
-                       ((uint32_t)(rect->top + row) * out->stride_bytes) +
-                       ((uint32_t)rect->left * 2U);
-        const uint8_t *line = src + ((uint32_t)row * (uint32_t)rect_w * 3U);
-        for (int col = 0; col < rect_w; col++) {
-            const uint8_t r = line[(col * 3) + 0];
-            const uint8_t g = line[(col * 3) + 1];
-            const uint8_t b = line[(col * 3) + 2];
-            const uint16_t rgb565 = ((uint16_t)(r & 0xF8) << 8) |
-                                    ((uint16_t)(g & 0xFC) << 3) |
-                                    ((uint16_t)b >> 3);
-            dst[(col * 2) + 0] = (uint8_t)(rgb565 >> 8);
-            dst[(col * 2) + 1] = (uint8_t)rgb565;
-        }
-    }
-    return 1;
-}
-
-static bool read_video_header(FILE *file, screen_video_header_t *header)
-{
-    uint8_t raw[SCREEN_VIDEO_HEADER_SIZE];
-    if (!read_exact(file, raw, sizeof(raw))) {
-        return false;
-    }
-
-    *header = (screen_video_header_t) {
-        .magic = read_le32(&raw[0]),
-        .version = read_le16(&raw[4]),
-        .header_size = read_le16(&raw[6]),
-        .width = read_le16(&raw[8]),
-        .height = read_le16(&raw[10]),
-        .fps = read_le16(&raw[12]),
-        .flags = read_le16(&raw[14]),
-        .frame_count = read_le32(&raw[16]),
-        .frame_table_offset = read_le32(&raw[20]),
-        .data_offset = read_le32(&raw[24]),
-        .reserved = read_le32(&raw[28]),
-    };
-
-    return header->magic == SCREEN_VIDEO_MAGIC &&
-           header->version == 1 &&
-           header->header_size == SCREEN_VIDEO_HEADER_SIZE &&
-           header->width == SCREEN_PLAYER_WIDTH &&
-           header->height == SCREEN_PLAYER_HEIGHT &&
-           header->fps > 0 &&
-           header->frame_count > 0;
-}
-
-static esp_err_t decode_and_draw_frame(FILE *file, uint32_t jpeg_size)
-{
-    if (jpeg_size == 0 || jpeg_size > SCREEN_VIDEO_MAX_JPEG_BYTES) {
-        s_status.last_error = "jpeg_frame_too_large";
-        return ESP_ERR_INVALID_SIZE;
-    }
-    if (!read_exact(file, s_jpeg_buffer, jpeg_size)) {
-        s_status.last_error = "jpeg_frame_read_failed";
-        return ESP_FAIL;
-    }
-
-    jpeg_decode_context_t decode = {
-        .jpeg_data = s_jpeg_buffer,
-        .jpeg_size = jpeg_size,
-        .offset = 0,
-        .bytes_left = jpeg_size,
-        .framebuffer = s_framebuffer,
-        .stride_bytes = SCREEN_PLAYER_WIDTH * 2U,
-    };
-    JDEC jd = {0};
-
-    JRESULT jret = jd_prepare(&jd, jpeg_input_func, s_tjpg_work, SCREEN_VIDEO_TJPG_WORK_BYTES, &decode);
-    if (jret != JDR_OK) {
-        s_status.decode_errors++;
-        s_status.last_error = "jpeg_prepare_failed";
-        return ESP_FAIL;
-    }
-    if (jd.width != SCREEN_PLAYER_WIDTH || jd.height != SCREEN_PLAYER_HEIGHT) {
-        s_status.decode_errors++;
-        s_status.last_error = "jpeg_size_mismatch";
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    jret = jd_decomp(&jd, jpeg_output_func, 0);
-    if (jret != JDR_OK) {
-        s_status.decode_errors++;
-        s_status.last_error = "jpeg_decode_failed";
-        return ESP_FAIL;
-    }
-
-    return screen_player_draw_rgb565_rect(0,
-                                          0,
-                                          SCREEN_PLAYER_WIDTH,
-                                          SCREEN_PLAYER_HEIGHT,
-                                          s_framebuffer,
-                                          SCREEN_PLAYER_WIDTH * SCREEN_PLAYER_HEIGHT * 2U);
-}
-
-static esp_err_t play_video_file(const char *path, bool loop_forever)
-{
-    FILE *file = fopen(path, "rb");
-    if (file == NULL) {
-        ESP_LOGW(TAG, "video open failed: %s errno=%d", path, errno);
-        s_status.last_error = "video_open_failed";
-        return ESP_FAIL;
-    }
-
-    screen_video_header_t header;
-    if (!read_video_header(file, &header)) {
-        fclose(file);
-        s_status.last_error = "video_header_invalid";
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-
-    const int64_t frame_period_us = 1000000LL / header.fps;
-    ESP_LOGI(TAG, "Playing %s: %lux%u @ %u fps, %lu frames",
-             path,
-             (unsigned long)header.width,
-             header.height,
-             header.fps,
-             (unsigned long)header.frame_count);
-
-    do {
-        if (fseek(file, (long)header.data_offset, SEEK_SET) != 0) {
-            s_status.last_error = "video_seek_failed";
-            fclose(file);
-            return ESP_FAIL;
-        }
-
-        int64_t next_frame_us = esp_timer_get_time();
-        for (uint32_t frame = 0; frame < header.frame_count; frame++) {
-            uint8_t raw[SCREEN_VIDEO_FRAME_HEADER_SIZE];
-            if (!read_exact(file, raw, sizeof(raw))) {
-                s_status.last_error = "frame_header_read_failed";
-                fclose(file);
-                return ESP_FAIL;
-            }
-
-            const uint32_t jpeg_size = read_le32(&raw[0]);
-            const uint32_t duration_us = read_le32(&raw[4]);
-            const int64_t start_us = esp_timer_get_time();
-            esp_err_t ret = decode_and_draw_frame(file, jpeg_size);
-            const int64_t elapsed_us = esp_timer_get_time() - start_us;
-            s_status.last_frame_us = (uint32_t)elapsed_us;
-            if (ret != ESP_OK) {
-                ESP_LOGW(TAG, "frame %lu failed: %s", (unsigned long)frame, esp_err_to_name(ret));
-                fclose(file);
-                return ret;
-            }
-            s_status.frames_rendered++;
-            s_status.last_error = NULL;
-
-            next_frame_us += duration_us != 0 ? duration_us : frame_period_us;
-            int64_t sleep_us = next_frame_us - esp_timer_get_time();
-            if (sleep_us > 1000) {
-                vTaskDelay(pdMS_TO_TICKS((uint32_t)(sleep_us / 1000)));
-            } else if (sleep_us < -frame_period_us) {
-                s_status.frames_dropped++;
-                next_frame_us = esp_timer_get_time();
-            } else {
-                taskYIELD();
-            }
-        }
-    } while (loop_forever);
-
-    fclose(file);
-    return ESP_OK;
+    s_status.frames_dropped++;
+    s_status.last_error = error == NULL ? "screen_frame_failed" : error;
 }
 
 static void player_task(void *arg)
 {
     (void)arg;
-    s_status.playing = true;
-    s_status.active_asset = s_boot_path;
 
-    esp_err_t ret = play_video_file(s_boot_path, false);
+    s_status.playing = true;
+    s_status.active_asset = "startup_settle";
+    s_status.last_error = NULL;
+    vTaskDelay(pdMS_TO_TICKS(SCREEN_BOOT_SETTLE_MS));
+
+    s_status.active_asset = "startup_reveal";
+    esp_err_t ret = screen_roboeyes_play_startup();
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "boot video skipped: %s", esp_err_to_name(ret));
+        s_status.last_error = "startup_reveal_failed";
+        ESP_LOGW(TAG, "startup reveal failed: %s", esp_err_to_name(ret));
     }
 
-    s_status.active_asset = s_loop_path;
+    s_status.active_asset = SCREEN_ROBOEYES_ASSET;
+    ret = screen_roboeyes_begin_expression("normal");
+    if (ret != ESP_OK) {
+        s_status.last_error = "roboeyes_begin_failed";
+        ESP_LOGW(TAG, "RoboEyes begin failed: %s", esp_err_to_name(ret));
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "RoboEyes animation active: %dx%d QSPI",
+             SCREEN_PLAYER_WIDTH,
+             SCREEN_PLAYER_HEIGHT);
+
     while (1) {
-        ret = play_video_file(s_loop_path, true);
+        ret = screen_roboeyes_update();
         if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "loop video failed: %s", esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            screen_player_report_frame(ret, 0, "roboeyes_update_failed");
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
         }
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -628,6 +362,10 @@ esp_err_t screen_player_init(const screen_player_config_t *config)
         .sclk_io_num = config->sck_gpio,
         .data2_io_num = config->data2_gpio,
         .data3_io_num = config->data3_gpio,
+        .data4_io_num = -1,
+        .data5_io_num = -1,
+        .data6_io_num = -1,
+        .data7_io_num = -1,
         .data_io_default_level = false,
         .max_transfer_sz = ST77916_SPI_MAX_TRANSFER_BYTES,
         .flags = SPICOMMON_BUSFLAG_MASTER | SPICOMMON_BUSFLAG_QUAD,
@@ -658,7 +396,7 @@ esp_err_t screen_player_init(const screen_player_config_t *config)
     return ESP_OK;
 }
 
-esp_err_t screen_player_start_sequence(const char *boot_path, const char *loop_path)
+esp_err_t screen_player_start_eyes(void)
 {
     if (!s_status.enabled) {
         return ESP_OK;
@@ -666,25 +404,19 @@ esp_err_t screen_player_start_sequence(const char *boot_path, const char *loop_p
     if (!s_status.initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (boot_path == NULL || loop_path == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
     if (s_player_task != NULL) {
         return ESP_OK;
     }
 
-    ESP_RETURN_ON_ERROR(ensure_video_resources(), TAG, "video resources init failed");
-
-    strlcpy(s_boot_path, boot_path, sizeof(s_boot_path));
-    strlcpy(s_loop_path, loop_path, sizeof(s_loop_path));
     s_status.playing = true;
-    s_status.active_asset = s_boot_path;
-    if (xTaskCreate(player_task,
-                    "screen_player",
-                    SCREEN_VIDEO_TASK_STACK,
-                    NULL,
-                    SCREEN_VIDEO_TASK_PRIORITY,
-                    &s_player_task) != pdPASS) {
+    s_status.active_asset = "startup_settle";
+    if (xTaskCreatePinnedToCore(player_task,
+                                "screen_roboeyes",
+                                SCREEN_TASK_STACK,
+                                NULL,
+                                SCREEN_TASK_PRIORITY,
+                                &s_player_task,
+                                1) != pdPASS) {
         s_status.last_error = "task_create_failed";
         return ESP_ERR_NO_MEM;
     }
