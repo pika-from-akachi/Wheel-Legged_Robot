@@ -1,3 +1,35 @@
-idf_component_register(SRCS "main.c"
-                    INCLUDE_DIRS "."
-                    REQUIRES esp_http_server cJSON)
+idf_component_register(SRCS
+                        "main.c"
+                        "app/wheel_app.c"
+                        "bsp/wheel_bsp.c"
+                        "communication/stm32_protocol.c"
+                        "communication/telemetry_bridge.c"
+                        "module/fan/fan_pwm.c"
+                        "module/light/light_pwm.c"
+                        "module/screen/screen_player.c"
+                        "module/screen/screen_ui.c"
+                        "network/web_server.c"
+                    INCLUDE_DIRS
+                        "."
+                        "app"
+                        "bsp"
+                        "communication"
+                        "module/fan"
+                        "module/light"
+                        "module/screen"
+                        "network"
+                    REQUIRES
+                        esp_driver_gpio
+                        esp_driver_ledc
+                        esp_driver_spi
+                        esp_driver_uart
+                        esp_event
+                        esp_http_server
+                        esp_hw_support
+                        esp_netif
+                        esp_timer
+                        esp_wifi
+                        nvs_flash
+                        spiffs)
+
+spiffs_create_partition_image(storage ../data FLASH_IN_PROJECT)

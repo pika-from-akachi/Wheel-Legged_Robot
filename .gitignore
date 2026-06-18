@@ -32,3 +32,4 @@ __pycache__/
 # Large files (exceeds GitHub size limit)
 esp32_app/data/3d/wode_dao_dun.glb
 tools/wheel-legged-sim/meshes/wode_dao_dun.obj
+build
