@@ -228,7 +228,7 @@ void LQR_Update(LQR_Controller_t *lqr, BalanceState_t *measured_state, float dt)
     lqr->u[1] += lqr->gain.Kff[1] * lqr->reference[3];
 
     /* Apply integral (unused, joint channel) */
-    lqr->u[1] += lqr->integral_error * LQR_DEFAULT_KI;
+    lqr->u[1] -= lqr->integral_error * LQR_DEFAULT_KI;
 
     /* Saturate outputs */
     LQR_ComputeControl(lqr, dt);

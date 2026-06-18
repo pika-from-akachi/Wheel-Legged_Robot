@@ -102,7 +102,7 @@ LQR_Controller_t g_lqr_controller;
 LQR_TuningParams_t g_lqr_tuning;
 RobotState_t g_robot_state;
 volatile uint8_t g_balance_enabled = 0;
-volatile float g_accel_offset = 3.14159f;  /* π for Z-up IMU */  /* IMU校准: 0.00589 rad */
+volatile float g_accel_offset = 3.096f;  /* 177.4 deg */  /* 177 deg */  /* 176.6 deg */  /* 177 deg */  /* 176.2 deg, 调谐值 */  /* π for Z-up IMU */  /* IMU校准: 0.00589 rad */
 volatile float g_gyro_bias = 0.0f;   /* 陀螺仪零偏(rad/s) */
 volatile float debug_lqr_body_angle = 0.0f;
 
@@ -806,13 +806,10 @@ void Task_Balance(void *argument)
         
         
         
-        /* 轮速反馈: 从电机读取RPM,转rad/s,用于阻尼漂移 */
+        /* 轮速反馈: 从电机读取RPM,转rad/s */
         MotorStatus_t *ms = MOTOR_GetStatus();
-        float wheel_spd = (ms && ms->isValid) ? ms->speed * 0.10472f : 0.0f;
-        balance_state.wheel_velocity = wheel_spd;
+        balance_state.wheel_velocity = (ms && ms->isValid) ? ms->speed * 0.10472f : 0.0f;
         balance_state.wheel_position = 0.0f;
-        balance_state.wheel_position = 0.0f;
-        balance_state.wheel_velocity = 0.0f;
         LQR_Update(&g_lqr_controller, &balance_state, dt);
 
         /* Current mode output + 重心偏后补偿 */
