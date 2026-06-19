@@ -22,8 +22,9 @@ This project implements the embedded control system for a wheel-legged robot, de
 - **Interrupt-Driven IMU**: ICM-42688-P read by TIM2 hardware interrupt (1 kHz, deterministic timing)
 - **Multi-Motor Support**: EL05 joint motor (CAN extended frame), M0601C wheel motor (RS485)
 - **Dual Wheel Drive**: Left wheel (ID=1) and right wheel (ID=2) with differential speed control
-- **LQR Control Framework**: Linear Quadratic Regulator balancing with gain scheduling
-- **Dual MCU Architecture**: STM32F407 (control) + ESP32-S3 (wireless tuning bridge)
+- **LQR Balance Controller**: PD+I+Kv+Kpos with empirically tuned gains and speed/position loops
+- **Dual MCU Architecture**: STM32F407 (control) + ESP32-S3 (wireless tuning + web remote)
+- **Web Remote Control**: Touch joystick drive + light toggle via ESP32 hotspot (192.168.4.1/remote)
 - **Wireless Tuning App**: Alpine.js + Three.js 3D visualization with real-time parameter adjustment
 - **3D Visualization**: Real-time robot state monitoring via Three.js
 - **IMU Sensor**: ICM-42688-P 6-axis IMU with Kalman filter (SPI1)
@@ -240,54 +241,90 @@ This project uses **FreeRTOS V10.6.2** with a comprehensive task-based architect
 
 ---
 
-## LQR Control Framework
+## LQR Balance Controller | LQR平衡控制器
 
-The system implements a **Linear Quadratic Regulator (LQR)** for wheel-legged robot balancing based on a reduced-order inverted-pendulum-on-wheels model.
+The balancing controller uses a **PD + Integral + Velocity Loop + Position Loop** architecture on a reduced 4-state inverted-pendulum-on-wheels model. Gains are tuned empirically rather than solved online via Riccati.
 
-### State Space Model
+> 平衡控制器采用 **PD + 积分 + 速度环 + 位置环** 架构。增益通过实测调谐而非在线 Riccati 求解。
 
-**Reduced state vector (4-dim):**
+### Control Law | 控制律
+
 ```
-x = [body_angle, body_rate, wheel_position, wheel_velocity]^T
-```
-
-**Control input (2-dim):**
-```
-u = [joint_torque, wheel_torque]^T
+u_wheel = -(P·θ + D·ω + Kpos·pos + Kv·vel) - Ki·∫θdt
 ```
 
-**Control law:**
+Where `θ = body_angle`, `ω = body_rate`, `pos = wheel_position`, `vel = wheel_velocity`.
+
+| Term | Description | 描述 |
+|:-----|:------------|:-----|
+| P·θ | Body angle stiffness | 体角刚度，倾斜→恢复力 |
+| D·ω | Body rate damping | 角速度阻尼，防过冲 |
+| Kpos·pos | Position loop — pulls back to origin | 位置环，走远了拉回 |
+| Kv·vel | Velocity loop — resists wheel slip | 速度环，轮速→零速锁定 |
+| Ki·∫θdt | Integral — eliminates steady drift | 积分项，消除残留偏移 |
+
+### Tuned Gains (Current) | 当前调谐参数
+
+| Gain | Value | Unit | Description |
+|:-----|:-----:|:----:|:------------|
+| **P** | **+2.0** | Nm/rad | Body angle stiffness / 体角刚度 |
+| **D** | **+0.3** | Nm/(rad/s) | Body rate damping / 角速度阻尼 |
+| **Kpos** | **+0.1** | Nm/rad | Wheel position loop / 位置环 |
+| **Kv** | **+2.7** | Nm/(rad/s) | Wheel velocity loop / 速度环 |
+| **Ki** | **3.0** | Nm/(rad·s) | Integral gain (limit ±0.3 Nm) / 积分增益(限幅0.3) |
+| g_accel_offset | 3.089 | rad | IMU balance zero (177°) / IMU平衡零点 |
+
+> **Note:** Positive gains verified by motor direction test. `u = -(K·x)` → forward tilt (θ>0) produces negative torque → wheel forward → correction.
+> **注:** 正增益经由电机方向测试验证。前倾(θ>0)→负扭矩→轮子向前→修正。
+
+### State Estimation | 状态估计
+
 ```
-u = -K * x + Ki * integral(body_angle_error)
+body_angle = complementary_filter(gyro_integral, accel_angle)
+           = 0.90·(angle + gyro·dt) + 0.10·atan2(accel_y, accel_z)
+
+body_rate  = gyro_x (negated for X/Z-flipped IMU)
+
+wheel_vel  = M0601C_Motor.feedback.speed_rpm × 0.10472 (RPM→rad/s)
+wheel_pos  = ∫ wheel_vel · dt  (×0.999 decay)
 ```
 
-### LQR Weights
+### IMU Calibration | IMU校准
 
-| Weight | Parameter | Default | Effect |
-|--------|-----------|---------|--------|
-| Q₁₁ | Body angle | 100 | Stiffness of balance |
-| Q₂₂ | Body rate | 10 | Damping of body motion |
-| Q₃₃ | Wheel position | 1 | Position regulation |
-| Q₄₄ | Wheel velocity | 1 | Speed damping |
-| R₁₁ | Joint torque effort | 0.1 | Joint energy cost |
-| R₂₂ | Wheel torque effort | 0.5 | Wheel energy cost |
-| Kᵢ | Integral gain | 0.5 | Steady-state error removal |
+1. Z-up orientation verified by 3-pose test (upright, forward-tilt, backward-tilt)
+2. `g_accel_offset = atan2(ay, az) at upright ≈ π` (hardcoded to 3.089 rad / 177°)
+3. Gyro bias set to 0 (complementary filter auto-converges)
+4. Motor-task auto-calibration disabled (offset is hardcoded)
 
-### Gain Scheduling
+### Tuning History | 调参历程
 
-| Mode | Description | Application |
-|------|-------------|-------------|
-| Standing | High stiffness, aggressive balance | Upright balancing |
-| Driving | Reduced stiffness, allows forward motion | Locomotion |
-| Sitting | Zero output, motors idle | Resting/startup |
-| Emergency Stop | Immediate disable with braking | Safety |
+| Step | P | D | Ki | Kv | Kpos | Note |
+|:-----|:--:|:--:|:--:|:--:|:--:|:-----|
+| Initial | 0.5 | 0.2 | 0 | 0 | 0 | 原始代码，摆幅大 |
+| Fix IMU | 0.5 | 0.2 | 0 | 0 | 0 | 修正IMU方向(倒装→正装) |
+| Tune P up | 0.5→1.3 | 0.2 | 0 | 0 | 0 | 逐步提P，定点稳定 |
+| Add Ki | 1.3 | 0.2 | 0.2→3.0 | 0 | 0 | 积分方向修正(+=→−=) |
+| Add Kv | 1.3 | 0.2 | 0.8 | 0→2.7 | 0 | 速度环定点锁定 |
+| Add Kpos | 1.8 | 0.3 | 3.0 | 2.7 | 0.1 | 位置环归零 |
+| Current | **2.0** | **0.3** | **3.0** | **2.7** | **0.1** | 最终调谐 |
 
-### Key Files
+### Key Files | 关键文件
 
-- `Core/Inc/lqr_control.h` - LQR controller API
-- `Core/Src/lqr_control.c` - LQR implementation (Riccati solver, state feedback)
-- `Core/Inc/robot_model.h` - Robot kinematics and dynamics model
-- `Core/Src/robot_model.c` - Model implementation (linearized dynamics)
+| File | Description |
+|:-----|:------------|
+| `Core/Inc/lqr_control.h` | LQR controller API + default parameters |
+| `Core/Src/lqr_control.c` | LQR implementation (state feedback + integral) |
+| `Core/Inc/robot_model.h` | Robot kinematics, state definitions |
+| `Core/Src/robot_model.c` | Gain matrix K[2][4], linearized dynamics |
+| `Core/Src/freertos.c` | Task_Balance (200Hz): IMU→filter→LQR→motors |
+| `Core/Src/icm42688.c` | ICM-42688-P IMU driver (SPI, 1kHz ISR) |
+
+### Safety | 安全
+
+- Integral only active when `|θ| < 0.2 rad` (conditional anti-windup)
+- Wheel torque saturated to ±3.0 Nm
+- Body angle exceeds ±0.52 rad (±30°) → emergency condition
+- Torque deadband: ±0.02 Nm → zero output
 
 ---
 
