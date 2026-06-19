@@ -1,28 +1,35 @@
-import re, os
+import os
+import re
 
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-with open('esp32_app/data/index.html', 'r', encoding='utf-8') as f:
+with open("esp32_app/data/index.html", "r", encoding="utf-8") as f:
     content = f.read()
 
-m = re.search(r'function tuningApp\(\)\s*\{', content)
-start = m.start()
-script = content[start:]
+match = re.search(r"<script>([\s\S]*)</script>", content)
+script = match.group(1) if match else ""
 
-opens = script.count('{')
-closes = script.count('}')
+opens = script.count("{")
+closes = script.count("}")
 
-print(f'Open braces:  {opens}')
-print(f'Close braces: {closes}')
-print(f'Balanced:     {opens == closes}')
+print(f"Script found:  {bool(script)}")
+print(f"Open braces:   {opens}")
+print(f"Close braces:  {closes}")
+print(f"Balanced:      {opens == closes}")
 
 checks = [
-    'loadRealModel',
-    'buildPlaceholderModel',
-    'GLTFLoader',
-    'startAnimationLoop',
-    'connectWebSocket',
+    "轮足机器人遥控台",
+    "WASD 遥控",
+    "connectWebSocket",
+    "sendDrive",
+    "setKey",
+    "keydown",
+    "keyup",
+    "enableSwitch",
+    'type: "drive"',
+    "max_rpm",
 ]
-for c in checks:
-    found = c in script
-    print(f'  {c}: {"OK" if found else "MISSING"}')
+
+for check in checks:
+    haystack = content if check.startswith("轮") or check.startswith("WASD") else script
+    print(f"  {check}: {'OK' if check in haystack else 'MISSING'}")

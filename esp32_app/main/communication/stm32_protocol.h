@@ -27,6 +27,7 @@ extern "C" {
 #define PKT_TYPE_SET_SPEED      0x07
 #define PKT_TYPE_SET_POSITION   0x08
 #define PKT_TYPE_M0601C_CMD     0x09
+#define PKT_TYPE_DRIVE_CMD      0x0A
 #define PKT_TYPE_REMOTE_BTN     0x10
 #define PKT_TYPE_SYS_RESET      0x20
 #define PKT_TYPE_FW_VERSION     0x30

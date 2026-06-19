@@ -49,6 +49,7 @@ osThreadId_t taskHandle_IMU = NULL;
 osThreadId_t taskHandle_Balance = NULL;
 osThreadId_t taskHandle_Motor = NULL;
 osThreadId_t taskHandle_Remote = NULL;
+osThreadId_t taskHandle_ESP32_COM = NULL;
 osThreadId_t taskHandle_Monitor = NULL;
 osThreadId_t taskHandle_Debug = NULL;
 
@@ -56,11 +57,13 @@ osThreadId_t taskHandle_Debug = NULL;
 osMessageQueueId_t queue_IMUData = NULL;
 osMessageQueueId_t queue_RemoteData = NULL;
 osMessageQueueId_t queue_MotorCmd = NULL;
+osMessageQueueId_t queue_ESP32Cmd = NULL;
 
 /* ===== Mutex handles ===== */
 osMutexId_t mutex_CAN = NULL;
 osMutexId_t mutex_SPI1 = NULL;
 osMutexId_t mutex_SPI3 = NULL;
+osMutexId_t mutex_UART_ESP32 = NULL;
 
 /* ===== Semaphore handles ===== */
 osSemaphoreId_t sem_IMU_Ready = NULL;
@@ -122,6 +125,22 @@ volatile float debug_lqr_current_raw = 0.0f;
 volatile uint8_t debug_lqr_enabled = 0;
 volatile int16_t g_motor_test_cur = 0;
 volatile uint8_t g_calibrate_zero = 0;  /* 设1标定当前姿态为平衡零点 */   /* 非0时覆盖LQR输出,直接设电流 */
+
+/* ===== Cascaded balance PID (position -> speed -> angle -> current) ===== */
+volatile float g_cascade_pos_kp = 0.80f;          /* rad/s per rad */
+volatile float g_cascade_speed_kp = 0.008f;       /* rad per (rad/s) */
+volatile float g_cascade_speed_ki = 0.000f;       /* rad per integrated speed error */
+volatile float g_cascade_angle_kp = 18000.0f;     /* current raw per rad */
+volatile float g_cascade_angle_kd = 1200.0f;      /* current raw per rad/s */
+volatile float g_cascade_turn_kp = 70.0f;         /* current raw per turn percent */
+volatile float g_cascade_max_angle = 0.12f;       /* rad */
+volatile float g_cascade_max_current = 12000.0f;  /* raw current */
+volatile float debug_cascade_wheel_pos = 0.0f;
+volatile float debug_cascade_pos_zero = 0.0f;
+volatile float debug_cascade_speed_ref = 0.0f;
+volatile float debug_cascade_speed_meas = 0.0f;
+volatile float debug_cascade_angle_ref = 0.0f;
+volatile float debug_cascade_turn_current = 0.0f;
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -159,6 +178,7 @@ void MX_FREERTOS_Init(void) {
   mutex_SPI1 = osMutexNew(NULL);
   mutex_SPI3 = osMutexNew(NULL);
   mutex_UART1 = osMutexNew(NULL);
+  mutex_UART_ESP32 = osMutexNew(NULL);
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -179,6 +199,7 @@ void MX_FREERTOS_Init(void) {
   queue_CAN_TX = osMessageQueueNew(20, sizeof(CAN_TxHeaderTypeDef), NULL);
   queue_CAN_RX = osMessageQueueNew(20, sizeof(CAN_RxHeaderTypeDef), NULL);
   queue_MotorCmd = osMessageQueueNew(10, sizeof(MotorCmd_t), NULL);
+  queue_ESP32Cmd = osMessageQueueNew(QUEUE_SIZE_ESP32_CMD, sizeof(uint8_t) * 20U, NULL);
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -266,6 +287,16 @@ void MX_FREERTOS_Init(void) {
       .priority = (osPriority_t) osPriorityLow,
     };
     taskHandle_Debug = osThreadNew(Task_Debug, NULL, &attr);
+  }
+
+  /* ESP32 communication task (50Hz) */
+  {
+    const osThreadAttr_t attr = {
+      .name = "ESP32_COM_Task",
+      .stack_size = TASK_STACK_SIZE_ESP32_COM * 4,
+      .priority = (osPriority_t) TASK_PRIORITY_ESP32_COM,
+    };
+    taskHandle_ESP32_COM = osThreadNew(Task_ESP32_COM, NULL, &attr);
   }
   /* USER CODE END RTOS_THREADS */
 
@@ -736,7 +767,8 @@ void Task_Balance(void *argument)
 
     #define WHEEL_ID_LEFT   1
     #define WHEEL_ID_RIGHT  2
-    BalanceState_t balance_state;
+    #define CASCADE_RPM_TO_RAD_S 0.10472f
+    #define CASCADE_INPUT_DEADBAND 5
 
     /* Wait for homing to complete */
     while (!g_balance_enabled) {
@@ -758,6 +790,12 @@ void Task_Balance(void *argument)
     tick_start = osKernelGetTickCount();
 
     for (;;) {
+        static float wheel_position = 0.0f;
+        static float position_zero = 0.0f;
+        static float speed_i = 0.0f;
+        static uint8_t last_drive_active = 0U;
+        static uint32_t last_drive_tick_seen = 0U;
+
         /* Read IMU raw data from ISR double buffer */
         ICM42688_RawData_t raw = IMU_GetLatestRawData();
         /* 标定: g_calibrate_zero=1时记录当前姿态为平衡零点 */
@@ -788,6 +826,8 @@ void Task_Balance(void *argument)
         float dt = (now_t - last_t) * 0.001f;
         if (dt > 0.001f && dt < 0.05f) {
             cf_angle = 0.90f * (cf_angle + gyro_rate * dt) + 0.10f * body_angle_raw;
+        } else {
+            dt = 0.005f;
         }
         /* 首次dt很大: 保持cf_angle初始值(0),不重置到body_angle_raw(运动污染) */
         last_t = now_t;
@@ -797,38 +837,109 @@ void Task_Balance(void *argument)
         if (g_lpf == 0.0f) g_lpf = gyro_rate;
         g_lpf += (gyro_rate - g_lpf) * 0.1f;
 
-        /* LQR state */
-        balance_state.body_angle = cf_angle;
-        balance_state.body_rate = gyro_rate;
-        /* 轮位估算: 从扭矩积分 */
-        /* wheel pos estimation removed */
-        
-        
-        
-        
         /* 轮速反馈: 从电机读取RPM,转rad/s,用于阻尼漂移 */
+        MOTOR_ParseFeedback(MOTOR_GetFeedback(), MOTOR_GetStatus());
         MotorStatus_t *ms = MOTOR_GetStatus();
-        float wheel_spd = (ms && ms->isValid) ? ms->speed * 0.10472f : 0.0f;
-        balance_state.wheel_velocity = wheel_spd;
-        balance_state.wheel_position = 0.0f;
-        balance_state.wheel_position = 0.0f;
-        balance_state.wheel_velocity = 0.0f;
-        LQR_Update(&g_lqr_controller, &balance_state, dt);
+        float wheel_spd = (ms && ms->isValid) ? ms->speed * CASCADE_RPM_TO_RAD_S : 0.0f;
+        wheel_position += wheel_spd * dt;
 
-        /* Current mode output + 重心偏后补偿 */
-        float torque = g_lqr_controller.u[1];
-        if (torque > -0.02f && torque < 0.02f) torque = 0.0f;
-        int16_t cur = (int16_t)(torque * 27306.0f);
-        if (cur > 32767) cur = 32767; if (cur < -32767) cur = -32767;
+        if (!LQR_IsEnabled(&g_lqr_controller)) {
+            position_zero = wheel_position;
+            speed_i = 0.0f;
+            last_drive_active = 0U;
+            last_drive_tick_seen = g_esp32_drive_last_tick;
+
+            osMutexAcquire(mutex_UART1, osWaitForever);
+            MOTOR_SetCurrent(WHEEL_ID_LEFT, 0);
+            MOTOR_SetCurrent(WHEEL_ID_RIGHT, 0);
+            osMutexRelease(mutex_UART1);
+
+            debug_lqr_body_angle = cf_angle;
+            debug_lqr_wheel_torque = 0.0f;
+            debug_lqr_current_raw = 0.0f;
+            debug_lqr_enabled = 0;
+            debug_cascade_wheel_pos = wheel_position;
+            debug_cascade_pos_zero = position_zero;
+            debug_cascade_speed_ref = 0.0f;
+            debug_cascade_speed_meas = wheel_spd;
+            debug_cascade_angle_ref = 0.0f;
+            debug_cascade_turn_current = 0.0f;
+
+            osDelayUntil(tick_start + 5);
+            tick_start += 5;
+            continue;
+        }
+
+        uint32_t now_drive = osKernelGetTickCount();
+        uint32_t drive_tick = g_esp32_drive_last_tick;
+        uint8_t drive_fresh =
+            (g_esp32_drive_enabled != 0U) &&
+            ((now_drive - drive_tick) < ESP32_DRIVE_TIMEOUT_MS);
+        int16_t throttle = drive_fresh ? g_esp32_drive_throttle : 0;
+        int16_t turn = drive_fresh ? g_esp32_drive_turn : 0;
+        int16_t max_rpm = drive_fresh ? g_esp32_drive_max_rpm : 0;
+
+        if (throttle > -CASCADE_INPUT_DEADBAND && throttle < CASCADE_INPUT_DEADBAND) {
+            throttle = 0;
+        }
+        if (turn > -CASCADE_INPUT_DEADBAND && turn < CASCADE_INPUT_DEADBAND) {
+            turn = 0;
+        }
+
+        uint8_t drive_active = (drive_fresh && (throttle != 0 || turn != 0)) ? 1U : 0U;
+        if (drive_tick != last_drive_tick_seen ||
+            (!drive_fresh && last_drive_active) ||
+            drive_active != last_drive_active) {
+            position_zero = wheel_position;
+            speed_i = 0.0f;
+            last_drive_tick_seen = drive_tick;
+        }
+        last_drive_active = drive_active;
+
+        float cmd_speed = ((float)throttle / 100.0f) * (float)max_rpm * CASCADE_RPM_TO_RAD_S;
+        float pos_error = position_zero - wheel_position;
+        float speed_ref = cmd_speed + g_cascade_pos_kp * pos_error;
+        float speed_error = speed_ref - wheel_spd;
+
+        speed_i += speed_error * dt;
+        if (speed_i > 4.0f) speed_i = 4.0f;
+        if (speed_i < -4.0f) speed_i = -4.0f;
+
+        float angle_ref = g_cascade_speed_kp * speed_error + g_cascade_speed_ki * speed_i;
+        if (angle_ref > g_cascade_max_angle) angle_ref = g_cascade_max_angle;
+        if (angle_ref < -g_cascade_max_angle) angle_ref = -g_cascade_max_angle;
+
+        float current = g_cascade_angle_kp * (angle_ref - cf_angle) - g_cascade_angle_kd * gyro_rate;
+        if (current > g_cascade_max_current) current = g_cascade_max_current;
+        if (current < -g_cascade_max_current) current = -g_cascade_max_current;
+
+        float turn_current = (float)turn * g_cascade_turn_kp;
+        if (turn_current > g_cascade_max_current) turn_current = g_cascade_max_current;
+        if (turn_current < -g_cascade_max_current) turn_current = -g_cascade_max_current;
+
+        float cur_left_f = current;
+        float cur_right_f = -current;
+        if (turn != 0) {
+            cur_left_f += turn_current;
+            cur_right_f += turn_current;
+        }
+        if (cur_left_f > g_cascade_max_current) cur_left_f = g_cascade_max_current;
+        if (cur_left_f < -g_cascade_max_current) cur_left_f = -g_cascade_max_current;
+        if (cur_right_f > g_cascade_max_current) cur_right_f = g_cascade_max_current;
+        if (cur_right_f < -g_cascade_max_current) cur_right_f = -g_cascade_max_current;
+
+        int16_t cur_left = (int16_t)cur_left_f;
+        int16_t cur_right = (int16_t)cur_right_f;
 
         /* 电机方向测试: g_motor_test_cur非0时覆盖输出 */
         if (g_motor_test_cur != 0) {
-            cur = g_motor_test_cur;
+            cur_left = g_motor_test_cur;
+            cur_right = -g_motor_test_cur;
         }
 
         osMutexAcquire(mutex_UART1, osWaitForever);
-        MOTOR_SetCurrent(WHEEL_ID_LEFT, cur);
-        MOTOR_SetCurrent(WHEEL_ID_RIGHT, -cur);
+        MOTOR_SetCurrent(WHEEL_ID_LEFT, cur_left);
+        MOTOR_SetCurrent(WHEEL_ID_RIGHT, cur_right);
         osMutexRelease(mutex_UART1);
 
         /* Log */
@@ -838,14 +949,20 @@ void Task_Balance(void *argument)
             g_log[li].tick  = uwTick;
             g_log[li].ay    = ax; g_log[li].az = az; g_log[li].gx = gx;
             g_log[li].angle = cf_angle; g_log[li].rate = g_lpf;
-            g_log[li].torque= torque;
+            g_log[li].torque= current;
         } }
 
         /* Debug */
         debug_lqr_body_angle = cf_angle;
-        debug_lqr_wheel_torque = torque;
-        debug_lqr_current_raw = (float)cur;
+        debug_lqr_wheel_torque = current;
+        debug_lqr_current_raw = (float)cur_left;
         debug_lqr_enabled = 1;
+        debug_cascade_wheel_pos = wheel_position;
+        debug_cascade_pos_zero = position_zero;
+        debug_cascade_speed_ref = speed_ref;
+        debug_cascade_speed_meas = wheel_spd;
+        debug_cascade_angle_ref = angle_ref;
+        debug_cascade_turn_current = turn_current;
 
         osDelayUntil(tick_start + 5);  /* 200Hz */
         tick_start += 5;
@@ -889,7 +1006,9 @@ void Task_Remote(void *argument)
             {
                 static uint8_t prev_btns = 0;
                 if (remoteData.buttons != prev_btns && remoteData.buttons != 0) {
+                    osMutexAcquire(mutex_UART_ESP32, osWaitForever);
                     ESP32_COM_SendRemoteBtn(remoteData.buttons, prev_btns);
+                    osMutexRelease(mutex_UART_ESP32);
                 }
                 prev_btns = remoteData.buttons;
             }
@@ -899,6 +1018,34 @@ void Task_Remote(void *argument)
 
         osDelayUntil(tick_start + 10);
         tick_start += 10;
+    }
+}
+
+/**
+  * @brief ESP32 communication task (50Hz)
+  */
+void Task_ESP32_COM(void *argument)
+{
+    uint32_t tick_start;
+    uint8_t state_divider = 0;
+
+    (void)argument;
+
+    ESP32_COM_StartRx();
+    tick_start = osKernelGetTickCount();
+
+    for (;;) {
+        osMutexAcquire(mutex_UART_ESP32, osWaitForever);
+        ESP32_COM_Update();
+
+        if (++state_divider >= 5U) {
+            ESP32_COM_SendStateData();
+            state_divider = 0;
+        }
+        osMutexRelease(mutex_UART_ESP32);
+
+        osDelayUntil(tick_start + 20);
+        tick_start += 20;
     }
 }
 

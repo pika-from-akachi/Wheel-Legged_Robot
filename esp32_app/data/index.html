@@ -3,991 +3,1035 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>轮足机器人无线调参系统</title>
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <title>轮足机器人遥控台</title>
     <style>
         :root {
-            --bg-primary: #0f1117;
-            --bg-secondary: #1a1d27;
-            --bg-card: #232734;
-            --border-color: #2e3348;
-            --text-primary: #e8eaed;
-            --text-secondary: #9aa0b0;
-            --accent-blue: #4fc3f7;
-            --accent-green: #66bb6a;
-            --accent-red: #ef5350;
-            --accent-orange: #ffa726;
-            --accent-purple: #ab47bc;
+            --bg: #151515;
+            --panel: #202124;
+            --panel-soft: #282a2d;
+            --line: #3a3d40;
+            --text: #f1f3f4;
+            --muted: #aeb4b9;
+            --green: #46d369;
+            --teal: #35c2ad;
+            --red: #ff5c5c;
+            --yellow: #f0b84f;
+            --blue: #6bb7ff;
+            --key: #303337;
         }
 
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        * {
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            height: 100%;
+        }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            overflow: hidden;
-            height: 100vh;
+            margin: 0;
+            min-width: 320px;
+            background: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+            letter-spacing: 0;
         }
 
-        /* Layout */
-        .app-container {
+        button,
+        input {
+            font: inherit;
+        }
+
+        button {
+            border: 0;
+            cursor: pointer;
+            color: inherit;
+        }
+
+        button:disabled {
+            cursor: not-allowed;
+            opacity: 0.45;
+        }
+
+        .app {
+            min-height: 100%;
             display: grid;
-            grid-template-columns: 320px 1fr 320px;
-            grid-template-rows: 56px 1fr 32px;
-            height: 100vh;
-            gap: 1px;
-            background: var(--border-color);
+            grid-template-rows: auto 1fr auto;
         }
 
-        /* Header */
-        .header {
-            grid-column: 1 / -1;
-            background: var(--bg-secondary);
+        .topbar {
+            min-height: 58px;
             display: flex;
             align-items: center;
-            padding: 0 20px;
             gap: 16px;
+            padding: 12px 18px;
+            border-bottom: 1px solid var(--line);
+            background: #1c1d1f;
         }
 
-        .header h1 {
-            font-size: 16px;
-            font-weight: 600;
-            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+        .brand {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            min-width: 0;
         }
 
-        .connection-status {
+        .brand h1 {
+            margin: 0;
+            font-size: 18px;
+            font-weight: 700;
+            line-height: 1.2;
+        }
+
+        .brand span {
+            color: var(--muted);
+            font-size: 12px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .status-strip {
             display: flex;
             align-items: center;
-            gap: 6px;
-            font-size: 12px;
-            color: var(--text-secondary);
+            gap: 10px;
             margin-left: auto;
+            flex-wrap: wrap;
+            justify-content: flex-end;
         }
 
-        .status-dot {
-            width: 8px;
-            height: 8px;
+        .pill {
+            min-height: 30px;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 0 10px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--panel);
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .dot {
+            width: 9px;
+            height: 9px;
             border-radius: 50%;
-            background: var(--accent-red);
-            transition: background 0.3s;
+            background: var(--red);
         }
 
-        .status-dot.online { background: var(--accent-green); box-shadow: 0 0 8px var(--accent-green); }
-        .status-dot.connecting { background: var(--accent-orange); animation: pulse 1s infinite; }
+        .dot.online {
+            background: var(--green);
+        }
 
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+        .dot.connecting {
+            background: var(--yellow);
+        }
 
-        /* Panels */
+        .layout {
+            width: min(1180px, 100%);
+            margin: 0 auto;
+            padding: 18px;
+            display: grid;
+            grid-template-columns: minmax(360px, 460px) minmax(0, 1fr);
+            gap: 18px;
+            align-items: start;
+        }
+
         .panel {
-            background: var(--bg-secondary);
-            overflow-y: auto;
-            padding: 16px;
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            overflow: hidden;
         }
 
-        .panel::-webkit-scrollbar { width: 4px; }
-        .panel::-webkit-scrollbar-track { background: transparent; }
-        .panel::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 2px; }
+        .panel-header {
+            min-height: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--line);
+        }
 
         .panel-title {
-            font-size: 11px;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            color: var(--text-secondary);
-            margin-bottom: 16px;
+            margin: 0;
+            font-size: 14px;
+            font-weight: 700;
         }
 
-        /* Cards */
-        .card {
-            background: var(--bg-card);
-            border: 1px solid var(--border-color);
+        .panel-body {
+            padding: 14px;
+        }
+
+        .enable-row {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 12px;
+            align-items: center;
+            padding: 14px;
+            border: 1px solid var(--line);
             border-radius: 8px;
-            padding: 12px;
-            margin-bottom: 12px;
+            background: var(--panel-soft);
         }
 
-        .card-title {
-            font-size: 12px;
-            font-weight: 500;
-            color: var(--text-secondary);
-            margin-bottom: 8px;
-        }
-
-        /* Parameter controls */
-        .param-group { margin-bottom: 8px; }
-
-        .param-label {
+        .enable-copy {
             display: flex;
-            justify-content: space-between;
-            font-size: 12px;
-            margin-bottom: 4px;
+            flex-direction: column;
+            gap: 2px;
+            min-width: 0;
         }
 
-        .param-label span:last-child {
-            color: var(--accent-blue);
-            font-family: 'JetBrains Mono', monospace;
+        .enable-copy strong {
+            font-size: 15px;
+        }
+
+        .enable-copy span {
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .switch {
+            position: relative;
+            width: 64px;
+            height: 36px;
+            flex: 0 0 auto;
+        }
+
+        .switch input {
+            position: absolute;
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .switch span {
+            position: absolute;
+            inset: 0;
+            border-radius: 999px;
+            background: #46494d;
+            transition: background 140ms ease;
+        }
+
+        .switch span::after {
+            content: "";
+            position: absolute;
+            width: 28px;
+            height: 28px;
+            top: 4px;
+            left: 4px;
+            border-radius: 50%;
+            background: #fff;
+            transition: transform 140ms ease;
+        }
+
+        .switch input:checked + span {
+            background: var(--green);
+        }
+
+        .switch input:checked + span::after {
+            transform: translateX(28px);
+        }
+
+        .control-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 14px;
+            margin-top: 14px;
+        }
+
+        .wasd {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(74px, 1fr));
+            grid-template-rows: repeat(3, 74px);
+            gap: 8px;
+        }
+
+        .key {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 2px;
+            min-width: 0;
+            min-height: 0;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--key);
+            color: var(--text);
+            user-select: none;
+            touch-action: none;
+        }
+
+        .key strong {
+            font-size: 26px;
+            line-height: 1;
+        }
+
+        .key span {
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .key.active {
+            border-color: var(--teal);
+            background: #1f4e48;
+            box-shadow: inset 0 0 0 1px var(--teal);
+        }
+
+        .key-forward {
+            grid-column: 2;
+            grid-row: 1;
+        }
+
+        .key-left {
+            grid-column: 1;
+            grid-row: 2;
+        }
+
+        .key-stop {
+            grid-column: 2;
+            grid-row: 2;
+            background: #493030;
+        }
+
+        .key-right {
+            grid-column: 3;
+            grid-row: 2;
+        }
+
+        .key-back {
+            grid-column: 2;
+            grid-row: 3;
+        }
+
+        .drive-readout {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .metric {
+            min-height: 70px;
+            padding: 10px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: #1b1c1e;
+        }
+
+        .metric label {
+            display: block;
+            color: var(--muted);
+            font-size: 12px;
+            margin-bottom: 6px;
+        }
+
+        .metric strong {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 24px;
+            font-weight: 700;
+        }
+
+        .metric small {
+            color: var(--muted);
+            font-size: 12px;
+            margin-left: 4px;
+        }
+
+        .settings {
+            display: grid;
+            gap: 12px;
+            padding: 12px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--panel-soft);
+        }
+
+        .range-row {
+            display: grid;
+            gap: 8px;
+        }
+
+        .range-label {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 10px;
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .range-label strong {
+            color: var(--text);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 14px;
         }
 
         input[type="range"] {
             width: 100%;
-            height: 4px;
-            -webkit-appearance: none;
-            background: var(--border-color);
-            border-radius: 2px;
-            outline: none;
+            accent-color: var(--teal);
         }
 
-        input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            width: 14px;
-            height: 14px;
-            border-radius: 50%;
-            background: var(--accent-blue);
-            cursor: pointer;
-            transition: transform 0.1s;
+        .actions {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
         }
 
-        input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.2); }
-
-        /* Buttons */
         .btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            padding: 8px 16px;
-            border: none;
-            border-radius: 6px;
-            font-size: 12px;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.2s;
-            width: 100%;
+            min-height: 42px;
+            border-radius: 8px;
+            padding: 0 12px;
+            font-weight: 700;
+            background: var(--panel-soft);
+            border: 1px solid var(--line);
         }
 
-        .btn-primary { background: var(--accent-blue); color: #000; }
-        .btn-primary:hover { opacity: 0.85; }
-        .btn-danger { background: var(--accent-red); color: #fff; }
-        .btn-danger:hover { opacity: 0.85; }
-        .btn-success { background: var(--accent-green); color: #000; }
-        .btn-success:hover { opacity: 0.85; }
+        .btn.primary {
+            background: var(--teal);
+            color: #071a17;
+            border-color: var(--teal);
+        }
 
-        .btn-group { display: flex; gap: 8px; margin-top: 12px; }
-        .btn-group .btn { flex: 1; }
+        .btn.danger {
+            background: var(--red);
+            color: #210707;
+            border-color: var(--red);
+        }
 
-        /* Telemetry */
         .telemetry-grid {
             display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 6px;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
         }
 
-        .telemetry-item {
-            background: var(--bg-primary);
-            border-radius: 6px;
-            padding: 8px;
-        }
-
-        .telemetry-item .label {
-            font-size: 10px;
-            color: var(--text-secondary);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-
-        .telemetry-item .value {
-            font-size: 16px;
-            font-weight: 600;
-            font-family: 'JetBrains Mono', monospace;
-            margin-top: 2px;
-        }
-
-        .telemetry-item .unit {
-            font-size: 11px;
-            color: var(--text-secondary);
-            font-weight: 400;
-        }
-
-        /* Mode selector */
-        .mode-selector {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 6px;
-        }
-
-        .mode-btn {
-            padding: 8px;
-            border: 1px solid var(--border-color);
-            border-radius: 6px;
-            background: transparent;
-            color: var(--text-secondary);
-            font-size: 11px;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-
-        .mode-btn.active {
-            border-color: var(--accent-blue);
-            color: var(--accent-blue);
-            background: rgba(79, 195, 247, 0.1);
-        }
-
-        .mode-btn:hover { border-color: var(--accent-blue); }
-
-        /* 3D Canvas */
-        .viewport {
-            background: var(--bg-primary);
-            position: relative;
-            overflow: hidden;
-        }
-
-        #robot-3d-canvas {
-            width: 100%;
-            height: 100%;
-            display: block;
-        }
-
-        .viewport-overlay {
-            position: absolute;
-            bottom: 12px;
-            left: 12px;
-            font-size: 10px;
-            color: rgba(255,255,255,0.3);
-            pointer-events: none;
-        }
-
-        /* Footer */
-        .footer {
+        .wide {
             grid-column: 1 / -1;
-            background: var(--bg-secondary);
+        }
+
+        .wheel-table {
+            width: 100%;
+            border-collapse: collapse;
+            overflow: hidden;
+            border-radius: 8px;
+        }
+
+        .wheel-table th,
+        .wheel-table td {
+            padding: 10px 8px;
+            border-bottom: 1px solid var(--line);
+            text-align: left;
+            font-size: 13px;
+        }
+
+        .wheel-table th {
+            color: var(--muted);
+            font-weight: 600;
+            background: #1b1c1e;
+        }
+
+        .wheel-table tr:last-child td {
+            border-bottom: 0;
+        }
+
+        .mono {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        }
+
+        .online-text {
+            color: var(--green);
+        }
+
+        .offline-text {
+            color: var(--red);
+        }
+
+        .footer {
             display: flex;
             align-items: center;
-            padding: 0 20px;
-            font-size: 11px;
-            color: var(--text-secondary);
-            gap: 16px;
+            justify-content: space-between;
+            gap: 12px;
+            min-height: 42px;
+            padding: 10px 18px;
+            border-top: 1px solid var(--line);
+            color: var(--muted);
+            background: #1c1d1f;
+            font-size: 12px;
         }
 
-        .footer .fps { margin-left: auto; font-family: monospace; }
-
-        /* Responsive */
-        @media (max-width: 1024px) {
-            .app-container {
-                grid-template-columns: 280px 1fr 280px;
+        @media (max-width: 860px) {
+            .topbar {
+                align-items: flex-start;
+                flex-direction: column;
             }
-        }
 
-        @media (max-width: 768px) {
-            .app-container {
+            .status-strip {
+                width: 100%;
+                margin-left: 0;
+                justify-content: flex-start;
+            }
+
+            .layout {
                 grid-template-columns: 1fr;
-                grid-template-rows: 56px 300px auto auto 32px;
-            }
-            .panel { max-height: 400px; }
-        }
-
-        /* Tabs for mobile */
-        .tab-bar {
-            display: none;
-            background: var(--bg-card);
-            border-bottom: 1px solid var(--border-color);
-        }
-
-        @media (max-width: 768px) {
-            .tab-bar {
-                display: flex;
-            }
-            .tab-bar button {
-                flex: 1;
-                padding: 10px;
-                border: none;
-                background: transparent;
-                color: var(--text-secondary);
-                font-size: 12px;
-                cursor: pointer;
-            }
-            .tab-bar button.active {
-                color: var(--accent-blue);
-                border-bottom: 2px solid var(--accent-blue);
+                padding: 12px;
             }
         }
 
-        .slider-value {
-            color: var(--accent-blue);
-            font-family: monospace;
-            font-size: 11px;
+        @media (max-width: 520px) {
+            .wasd {
+                grid-template-columns: repeat(3, minmax(58px, 1fr));
+                grid-template-rows: repeat(3, 64px);
+            }
+
+            .telemetry-grid,
+            .drive-readout,
+            .actions {
+                grid-template-columns: 1fr;
+            }
+
+            .footer {
+                align-items: flex-start;
+                flex-direction: column;
+            }
         }
     </style>
 </head>
 <body>
-    <div class="app-container" x-data="tuningApp()" x-init="init()">
-        <!-- Header -->
-        <header class="header">
-            <h1>🦾 轮足机器人 · LQR 调参系统</h1>
-            <div class="connection-status">
-                <span class="status-dot" :class="connectionStatus"></span>
-                <span x-text="statusText"></span>
-                <span>|</span>
-                <span>FW: v1.0.0</span>
+    <div class="app">
+        <header class="topbar">
+            <div class="brand">
+                <h1>轮足机器人遥控台</h1>
+                <span>WiFi AP: WheelRobot-Tuning · http://192.168.4.1</span>
+            </div>
+            <div class="status-strip">
+                <div class="pill"><span id="wsDot" class="dot"></span><span id="wsText">离线</span></div>
+                <div class="pill">STM32 <span id="stmText">未知</span></div>
+                <div class="pill">包 <span id="packetCount" class="mono">0</span></div>
             </div>
         </header>
 
-        <!-- Left Panel: Parameters -->
-        <div class="panel" id="left-panel">
-            <div class="panel-title">🎛️ LQR 参数调节</div>
-
-            <!-- Enable/Disable -->
-            <div class="card">
-                <div class="btn-group">
-                    <button class="btn btn-success" @click="enableMotors()" :disabled="!wsConnected">⚡ 使能</button>
-                    <button class="btn btn-danger" @click="disableMotors()" :disabled="!wsConnected">⏹ 关闭</button>
+        <main class="layout">
+            <section class="panel">
+                <div class="panel-header">
+                    <h2 class="panel-title">WASD 遥控</h2>
+                    <span id="driveState" class="pill">未使能</span>
                 </div>
-            </div>
-
-            <!-- Control Mode -->
-            <div class="card">
-                <div class="card-title">控制模式</div>
-                <div class="mode-selector">
-                    <template x-for="mode in modes" :key="mode.id">
-                        <button class="mode-btn" :class="{ active: currentMode === mode.id }"
-                                @click="setMode(mode.id)" :disabled="!wsConnected"
-                                x-text="mode.label"></button>
-                    </template>
-                </div>
-            </div>
-
-            <!-- LQR Q Matrix Weights -->
-            <div class="card">
-                <div class="card-title">状态权重 (Q 矩阵)</div>
-                <div class="param-group">
-                    <div class="param-label"><span>机体角度</span><span class="slider-value" x-text="params.Q_body_angle.toFixed(1)"></span></div>
-                    <input type="range" min="1" max="500" x-model="params.Q_body_angle" @input="sendTuning()">
-                </div>
-                <div class="param-group">
-                    <div class="param-label"><span>机体角速度</span><span class="slider-value" x-text="params.Q_body_rate.toFixed(1)"></span></div>
-                    <input type="range" min="0.1" max="100" x-model="params.Q_body_rate" @input="sendTuning()">
-                </div>
-                <div class="param-group">
-                    <div class="param-label"><span>车轮位置</span><span class="slider-value" x-text="params.Q_wheel_position.toFixed(1)"></span></div>
-                    <input type="range" min="0.1" max="50" x-model="params.Q_wheel_position" @input="sendTuning()">
-                </div>
-                <div class="param-group">
-                    <div class="param-label"><span>车轮速度</span><span class="slider-value" x-text="params.Q_wheel_velocity.toFixed(1)"></span></div>
-                    <input type="range" min="0.1" max="50" x-model="params.Q_wheel_velocity" @input="sendTuning()">
-                </div>
-            </div>
-
-            <!-- LQR R Matrix Weights -->
-            <div class="card">
-                <div class="card-title">控制权重 (R 矩阵)</div>
-                <div class="param-group">
-                    <div class="param-label"><span>关节力矩</span><span class="slider-value" x-text="params.R_joint_torque.toFixed(2)"></span></div>
-                    <input type="range" min="0.01" max="5" step="0.01" x-model="params.R_joint_torque" @input="sendTuning()">
-                </div>
-                <div class="param-group">
-                    <div class="param-label"><span>轮毂力矩</span><span class="slider-value" x-text="params.R_wheel_torque.toFixed(2)"></span></div>
-                    <input type="range" min="0.01" max="5" step="0.01" x-model="params.R_wheel_torque" @input="sendTuning()">
-                </div>
-            </div>
-
-            <!-- Saturation Limits -->
-            <div class="card">
-                <div class="card-title">输出限幅</div>
-                <div class="param-group">
-                    <div class="param-label"><span>最大关节力矩</span><span class="slider-value" x-text="params.max_joint_torque.toFixed(1) + ' N.m'"></span></div>
-                    <input type="range" min="1" max="12" step="0.5" x-model="params.max_joint_torque" @input="sendTuning()">
-                </div>
-                <div class="param-group">
-                    <div class="param-label"><span>最大轮毂力矩</span><span class="slider-value" x-text="params.max_wheel_torque.toFixed(1) + ' N.m'"></span></div>
-                    <input type="range" min="0.5" max="8" step="0.5" x-model="params.max_wheel_torque" @input="sendTuning()">
-                </div>
-            </div>
-
-            <!-- M0601C Hub Motor Controls -->
-            <div class="card">
-                <div class="card-title">M0601C 轮毂电机</div>
-                <div class="param-group">
-                    <div class="param-label"><span>加速时间 (accTime)</span><span class="slider-value" x-text="params.m0601c_acc_time.toFixed(0)"></span></div>
-                    <input type="range" min="0" max="100" step="1" x-model="params.m0601c_acc_time" @input="sendM0601CTuning()">
-                </div>
-                <div class="param-group">
-                    <div class="param-label"><span>刹车使能</span><span class="slider-value" x-text="params.m0601c_brake ? 'ON' : 'OFF'"></span></div>
-                    <input type="range" min="0" max="1" step="1" x-model="params.m0601c_brake" @input="sendM0601CTuning()">
-                </div>
-                <div class="btn-group" style="margin-top: 8px;">
-                    <button class="btn btn-primary" @click="testM0601C(100)" :disabled="!wsConnected">正转</button>
-                    <button class="btn btn-danger" @click="testM0601C(-100)" :disabled="!wsConnected">反转</button>
-                    <button class="btn" style="background: var(--border-color); color: var(--text-primary);" @click="testM0601C(0)" :disabled="!wsConnected">停止</button>
-                </div>
-            </div>
-        </div>
-
-        <!-- Center: 3D Viewport -->
-        <div class="viewport" id="viewport">
-            <div id="robot-3d-canvas"></div>
-            <div class="viewport-overlay">左键旋转 · 滚轮缩放 · 右键平移</div>
-        </div>
-
-        <!-- Right Panel: Telemetry -->
-        <div class="panel" id="right-panel">
-            <div class="panel-title">📊 实时遥测</div>
-
-            <!-- IMU Data -->
-            <div class="card">
-                <div class="card-title">IMU 姿态</div>
-                <div class="telemetry-grid">
-                    <div class="telemetry-item">
-                        <div class="label">横滚角 (Roll)</div>
-                        <div class="value" x-text="telemetry.roll.toFixed(1)"><span class="unit">°</span></div>
-                    </div>
-                    <div class="telemetry-item">
-                        <div class="label">俯仰角 (Pitch)</div>
-                        <div class="value" x-text="telemetry.pitch.toFixed(1)"><span class="unit">°</span></div>
-                    </div>
-                    <div class="telemetry-item">
-                        <div class="label">偏航角 (Yaw)</div>
-                        <div class="value" x-text="telemetry.yaw.toFixed(1)"><span class="unit">°</span></div>
-                    </div>
-                    <div class="telemetry-item">
-                        <div class="label">温度</div>
-                        <div class="value" x-text="telemetry.temp.toFixed(1)"><span class="unit">°C</span></div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Motor Status -->
-            <div class="card">
-                <div class="card-title">电机状态</div>
-                <div class="telemetry-grid">
-                    <template x-for="(motor, i) in telemetry.motors" :key="i">
-                        <div class="telemetry-item" :style="motor.online ? '' : 'opacity: 0.5;'">
-                            <div class="label">
-                                <span x-text="'M' + (i+1) + ' · ' + motorType(i)"></span>
-                                <span :style="{ color: motor.online ? 'var(--accent-green)' : 'var(--accent-red)', fontSize: '10px' }"
-                                      x-text="motor.online ? '●' : '○'"></span>
-                            </div>
-                            <div class="value" x-text="motor.speed.toFixed(0)" style="font-size: 14px;">
-                                <span class="unit">rpm</span>
-                            </div>
-                            <template x-if="i >= 4">
-                                <div style="font-size: 10px; color: var(--text-secondary); margin-top: 2px;">
-                                    <span x-text="motor.current.toFixed(1) + ' A'"></span>
-                                    <span x-text="' · ' + motor.temp.toFixed(0) + '°C'" style="margin-left: 4px;"></span>
-                                </div>
-                            </template>
+                <div class="panel-body">
+                    <div class="enable-row">
+                        <div class="enable-copy">
+                            <strong>机器人使能</strong>
+                            <span id="enableText">关闭</span>
                         </div>
-                    </template>
-                </div>
-            </div>
+                        <label class="switch" title="机器人使能">
+                            <input id="enableSwitch" type="checkbox">
+                            <span></span>
+                        </label>
+                    </div>
 
-            <!-- Control Output -->
-            <div class="card">
-                <div class="card-title">控制输出</div>
-                <div class="telemetry-grid">
-                    <div class="telemetry-item">
-                        <div class="label">关节力矩</div>
-                        <div class="value" :style="{ color: Math.abs(telemetry.control.jointTorque) > 3 ? 'var(--accent-red)' : 'var(--accent-blue)' }"
-                             x-text="telemetry.control.jointTorque.toFixed(2)"><span class="unit">N·m</span></div>
-                    </div>
-                    <div class="telemetry-item">
-                        <div class="label">轮毂力矩</div>
-                        <div class="value" :style="{ color: Math.abs(telemetry.control.wheelTorque) > 1.5 ? 'var(--accent-red)' : 'var(--accent-green)' }"
-                             x-text="telemetry.control.wheelTorque.toFixed(2)"><span class="unit">N·m</span></div>
+                    <div class="control-grid">
+                        <div class="wasd" aria-label="WASD 方向控制">
+                            <button class="key key-forward" data-key="w" aria-label="W 前进">
+                                <strong>W</strong><span>前进</span>
+                            </button>
+                            <button class="key key-left" data-key="a" aria-label="A 左转">
+                                <strong>A</strong><span>左转</span>
+                            </button>
+                            <button class="key key-stop" id="stopButton" aria-label="停止">
+                                <strong>STOP</strong><span>停止</span>
+                            </button>
+                            <button class="key key-right" data-key="d" aria-label="D 右转">
+                                <strong>D</strong><span>右转</span>
+                            </button>
+                            <button class="key key-back" data-key="s" aria-label="S 后退">
+                                <strong>S</strong><span>后退</span>
+                            </button>
+                        </div>
+
+                        <div class="drive-readout">
+                            <div class="metric">
+                                <label>油门</label>
+                                <strong id="throttleValue">0</strong><small>%</small>
+                            </div>
+                            <div class="metric">
+                                <label>转向</label>
+                                <strong id="turnValue">0</strong><small>%</small>
+                            </div>
+                            <div class="metric">
+                                <label>左轮目标</label>
+                                <strong id="leftTarget">0</strong><small>rpm</small>
+                            </div>
+                            <div class="metric">
+                                <label>右轮目标</label>
+                                <strong id="rightTarget">0</strong><small>rpm</small>
+                            </div>
+                        </div>
+
+                        <div class="settings">
+                            <div class="range-row">
+                                <div class="range-label">
+                                    <span>最大速度</span>
+                                    <strong><span id="maxRpmValue">220</span> rpm</strong>
+                                </div>
+                                <input id="maxRpm" type="range" min="40" max="500" step="10" value="220">
+                            </div>
+                            <div class="range-row">
+                                <div class="range-label">
+                                    <span>转向比例</span>
+                                    <strong><span id="turnScaleValue">80</span>%</strong>
+                                </div>
+                                <input id="turnScale" type="range" min="30" max="100" step="5" value="80">
+                            </div>
+                        </div>
+
+                        <div class="actions">
+                            <button id="connectButton" class="btn primary">重新连接</button>
+                            <button id="eStopButton" class="btn danger">急停</button>
+                        </div>
                     </div>
                 </div>
-            </div>
+            </section>
 
-            <!-- System Status -->
-            <div class="card">
-                <div class="card-title">系统状态</div>
-                <div class="telemetry-grid" style="grid-template-columns: 1fr;">
-                    <div class="telemetry-item" style="display: flex; justify-content: space-between;">
-                        <span class="label">控制频率</span>
-                        <span class="value" style="font-size: 13px;" x-text="telemetry.freq.toFixed(0) + ' Hz'"></span>
-                    </div>
-                    <div class="telemetry-item" style="display: flex; justify-content: space-between;">
-                        <span class="label">运行时间</span>
-                        <span class="value" style="font-size: 13px;" x-text="formatUptime(telemetry.uptime)"></span>
-                    </div>
-                    <div class="telemetry-item" style="display: flex; justify-content: space-between;">
-                        <span class="label">数据包</span>
-                        <span class="value" style="font-size: 13px;" x-text="telemetry.packets"></span>
+            <section class="panel">
+                <div class="panel-header">
+                    <h2 class="panel-title">实时遥测</h2>
+                    <span id="lastPacketAge" class="pill">无数据</span>
+                </div>
+                <div class="panel-body">
+                    <div class="telemetry-grid">
+                        <div class="metric">
+                            <label>横滚</label>
+                            <strong id="rollValue">0.0</strong><small>deg</small>
+                        </div>
+                        <div class="metric">
+                            <label>俯仰</label>
+                            <strong id="pitchValue">0.0</strong><small>deg</small>
+                        </div>
+                        <div class="metric">
+                            <label>偏航</label>
+                            <strong id="yawValue">0.0</strong><small>deg/s</small>
+                        </div>
+                        <div class="metric">
+                            <label>目标角度</label>
+                            <strong id="jointTorque">0.00</strong><small>rad</small>
+                        </div>
+                        <div class="metric">
+                            <label>电流输出</label>
+                            <strong id="wheelTorque">0</strong><small>raw</small>
+                        </div>
+                        <div class="metric">
+                            <label>模式</label>
+                            <strong id="modeValue">stand</strong>
+                        </div>
+                        <div class="wide">
+                            <table class="wheel-table">
+                                <thead>
+                                    <tr>
+                                        <th>轮毂</th>
+                                        <th>速度</th>
+                                        <th>电流</th>
+                                        <th>温度</th>
+                                        <th>在线</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td>左轮</td>
+                                        <td><span id="leftSpeed" class="mono">0</span> rpm</td>
+                                        <td><span id="leftCurrent" class="mono">0.00</span> A</td>
+                                        <td><span id="leftTemp" class="mono">0</span> C</td>
+                                        <td id="leftOnline" class="offline-text">否</td>
+                                    </tr>
+                                    <tr>
+                                        <td>右轮</td>
+                                        <td><span id="rightSpeed" class="mono">0</span> rpm</td>
+                                        <td><span id="rightCurrent" class="mono">0.00</span> A</td>
+                                        <td><span id="rightTemp" class="mono">0</span> C</td>
+                                        <td id="rightOnline" class="offline-text">否</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
-            </div>
-        </div>
+            </section>
+        </main>
 
-        <!-- Footer -->
         <footer class="footer">
-            <span>轮足机器人 LQR 控制系统</span>
-            <span>|</span>
-            <span>CAN: 4×EL05 · RS485: 2×M0601C</span>
-            <span class="fps" x-text="'FPS: ' + fps"></span>
+            <span id="lastCommand">最后命令: none</span>
+            <span id="bridgeStatus">桥接: 未读取</span>
         </footer>
     </div>
 
     <script>
-        function tuningApp() {
-            return {
-                // Connection
-                ws: null,
-                wsConnected: false,
-                connectionStatus: 'offline',
-                statusText: '离线',
-                reconnectTimer: null,
-
-                // 3D
-                scene: null,
-                camera: null,
-                renderer: null,
-                robotGroup: null,
-                controls: null,
-
-                // Performance
-                fps: 0,
-                frameCount: 0,
-                lastFpsTime: 0,
-
-                // Robot mode
-                currentMode: 'standing',
-                modes: [
-                    { id: 'standing', label: '🟢 站立' },
-                    { id: 'driving', label: '🚗 行驶' },
-                    { id: 'sitting', label: '🔽 坐下' },
-                    { id: 'calibration', label: '🔧 校准' },
-                ],
-
-                // LQR Parameters
-                params: {
-                    Q_body_angle: 100,
-                    Q_body_rate: 10,
-                    Q_wheel_position: 1,
-                    Q_wheel_velocity: 1,
-                    R_joint_torque: 0.1,
-                    R_wheel_torque: 0.5,
-                    max_joint_torque: 6,
-                    max_wheel_torque: 3,
-                    m0601c_acc_time: 10,
-                    m0601c_brake: 0,
-                },
-
-                // Telemetry data
-                telemetry: {
-                    roll: 0, pitch: 0, yaw: 0, temp: 25,
-                    motors: [
-                        { speed: 0, position: 0, torque: 0, current: 0, temp: 25, online: false },
-                        { speed: 0, position: 0, torque: 0, current: 0, temp: 25, online: false },
-                        { speed: 0, position: 0, torque: 0, current: 0, temp: 25, online: false },
-                        { speed: 0, position: 0, torque: 0, current: 0, temp: 25, online: false },
-                        { speed: 0, position: 0, torque: 0, current: 0, temp: 25, online: false },
-                        { speed: 0, position: 0, torque: 0, current: 0, temp: 25, online: false },
-                    ],
-                    control: { jointTorque: 0, wheelTorque: 0 },
-                    freq: 0,
-                    uptime: 0,
-                    packets: 0,
-                },
-
-                motorType(i) {
-                    return i < 4 ? 'EL05(关节)' : 'M0601C(轮毂)';
-                },
-
-                init() {
-                    this.init3D();
-                    this.connectWebSocket();
-                    this.startAnimationLoop();
-                    this.startFpsCounter();
-                },
-
-                init3D() {
-                    // Scene setup
-                    this.scene = new THREE.Scene();
-                    this.scene.background = new THREE.Color(0x0f1117);
-
-                    // Camera
-                    const container = document.getElementById('robot-3d-canvas');
-                    const rect = container.parentElement.getBoundingClientRect();
-                    this.camera = new THREE.PerspectiveCamera(45, rect.width / rect.height, 0.1, 100);
-                    this.camera.position.set(2, 1.5, 2.5);
-                    this.camera.lookAt(0, 0.5, 0);
-
-                    // Renderer
-                    this.renderer = new THREE.WebGLRenderer({ antialias: true });
-                    this.renderer.setSize(rect.width, rect.height);
-                    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-                    this.renderer.shadowMap.enabled = true;
-                    container.appendChild(this.renderer.domElement);
-
-                    // Controls
-                    this.controls = new THREE.OrbitControls(this.camera, this.renderer.domElement);
-                    this.controls.target.set(0, 0.5, 0);
-                    this.controls.enableDamping = true;
-                    this.controls.dampingFactor = 0.1;
-                    this.controls.update();
-
-                    // Lighting
-                    const ambientLight = new THREE.AmbientLight(0x404060, 0.5);
-                    this.scene.add(ambientLight);
-
-                    const dirLight = new THREE.DirectionalLight(0xffffff, 1);
-                    dirLight.position.set(3, 5, 4);
-                    dirLight.castShadow = true;
-                    this.scene.add(dirLight);
-
-                    const fillLight = new THREE.DirectionalLight(0x4fc3f7, 0.3);
-                    fillLight.position.set(-2, 1, -2);
-                    this.scene.add(fillLight);
-
-                    // Grid
-                    const gridHelper = new THREE.GridHelper(3, 20, 0x2e3348, 0x1a1d27);
-                    gridHelper.position.y = 0;
-                    this.scene.add(gridHelper);
-
-                    // Build placeholder robot model
-                    this.buildRobotModel();
-
-                    // Window resize
-                    window.addEventListener('resize', () => {
-                        const r = container.parentElement.getBoundingClientRect();
-                        this.camera.aspect = r.width / r.height;
-                        this.camera.updateProjectionMatrix();
-                        this.renderer.setSize(r.width, r.height);
-                    });
-                },
-
-                buildRobotModel() {
-                    this.robotGroup = new THREE.Group();
-
-                    const bodyGeo = new THREE.BoxGeometry(0.30, 0.08, 0.12);
-                    const bodyMat = new THREE.MeshStandardMaterial({
-                        color: 0x4fc3f7,
-                        metalness: 0.6,
-                        roughness: 0.3,
-                    });
-                    const body = new THREE.Mesh(bodyGeo, bodyMat);
-                    body.position.y = 0.45;
-                    body.castShadow = true;
-                    this.robotGroup.add(body);
-
-                    // Upper leg (placeholder)
-                    const legMat = new THREE.MeshStandardMaterial({
-                        color: 0x66bb6a,
-                        metalness: 0.3,
-                        roughness: 0.6,
-                    });
-
-                    // 4 legs
-                    const legPositions = [
-                        { x: -0.10, z: -0.05 }, // Left front
-                        { x: -0.10, z: 0.05 },  // Left back
-                        { x: 0.10, z: -0.05 },  // Right front
-                        { x: 0.10, z: 0.05 },   // Right back
-                    ];
-
-                    legPositions.forEach(pos => {
-                        const upperLeg = new THREE.Mesh(
-                            new THREE.CylinderGeometry(0.012, 0.015, 0.12, 8),
-                            legMat
-                        );
-                        upperLeg.position.set(pos.x, 0.35, pos.z);
-                        upperLeg.castShadow = true;
-                        this.robotGroup.add(upperLeg);
-
-                        const lowerLeg = new THREE.Mesh(
-                            new THREE.CylinderGeometry(0.010, 0.012, 0.12, 8),
-                            legMat
-                        );
-                        lowerLeg.position.set(pos.x, 0.22, pos.z);
-                        lowerLeg.castShadow = true;
-                        this.robotGroup.add(lowerLeg);
-
-                        // Joint sphere
-                        const joint = new THREE.Mesh(
-                            new THREE.SphereGeometry(0.018, 8, 8),
-                            new THREE.MeshStandardMaterial({ color: 0x2e3348, metalness: 0.5 })
-                        );
-                        joint.position.set(pos.x, 0.29, pos.z);
-                        this.robotGroup.add(joint);
-                    });
-
-                    // Wheels
-                    const wheelMat = new THREE.MeshStandardMaterial({
-                        color: 0x333333,
-                        metalness: 0.2,
-                        roughness: 0.8,
-                    });
-
-                    const wheelPositions = [
-                        { x: -0.14, z: 0 },
-                        { x: 0.14, z: 0 },
-                    ];
-
-                    wheelPositions.forEach(pos => {
-                        const wheel = new THREE.Mesh(
-                            new THREE.CylinderGeometry(0.04, 0.04, 0.025, 16),
-                            wheelMat
-                        );
-                        wheel.rotation.x = Math.PI / 2;
-                        wheel.position.set(pos.x, 0.04, pos.z);
-                        wheel.castShadow = true;
-                        this.robotGroup.add(wheel);
-                    });
-
-                    this.scene.add(this.robotGroup);
-                },
-
-                // --- WebSocket ---
-                connectWebSocket() {
-                    this.connectionStatus = 'connecting';
-                    this.statusText = '连接中...';
-
-                    const wsUrl = `ws://${window.location.hostname}/ws`;
-                    console.log('Connecting to:', wsUrl);
-
-                    try {
-                        this.ws = new WebSocket(wsUrl);
-                    } catch (e) {
-                        console.error('WebSocket error:', e);
-                        this.scheduleReconnect();
-                        return;
-                    }
-
-                    this.ws.onopen = () => {
-                        this.wsConnected = true;
-                        this.connectionStatus = 'online';
-                        this.statusText = '已连接';
-                        console.log('WebSocket connected');
-                    };
-
-                    this.ws.onclose = () => {
-                        this.wsConnected = false;
-                        this.connectionStatus = 'offline';
-                        this.statusText = '离线';
-                        console.log('WebSocket disconnected');
-                        this.scheduleReconnect();
-                    };
-
-                    this.ws.onerror = (err) => {
-                        console.error('WebSocket error:', err);
-                    };
-
-                    this.ws.onmessage = (event) => {
-                        this.handleRobotData(event.data);
-                    };
-                },
-
-                scheduleReconnect() {
-                    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-                    this.reconnectTimer = setTimeout(() => this.connectWebSocket(), 3000);
-                },
-
-                handleRobotData(data) {
-                    // Update telemetry counters
-                    this.telemetry.packets++;
-
-                    // Try to parse as JSON (echoed commands or JSON-formatted state)
-                    try {
-                        const json = JSON.parse(data);
-                        if (json.type === 'state') {
-                            Object.assign(this.telemetry, json.data);
-                        }
-                        return;
-                    } catch (e) {
-                        // Not JSON, try binary parsing
-                    }
-
-                    // Binary format: STM32 protocol packet or raw data
-                    if (data instanceof ArrayBuffer) {
-                        this.parseBinaryData(data);
-                    } else if (data instanceof Blob) {
-                        const reader = new FileReader();
-                        reader.onload = (e) => {
-                            this.parseBinaryData(e.target.result);
-                        };
-                        reader.readAsArrayBuffer(data);
-                    }
-                },
-
-                /**
-                 * Parse STM32 binary packet
-                 * Protocol: [0xAA][0xBB][type][len][payload...][crc16_H][crc16_L]
-                 * State data (type=0x82) payload format:
-                 *   [0..23]  IMU: 6×float32 LE (accel x/y/z, gyro x/y/z)
-                 *   [24..35] M0601C: 2×(int16 speed, int16 current, uint8 temp, uint8 online)
-                 *   [36..43] LQR: 2×float32 LE (joint_torque, wheel_torque)
-                 *   [44]     Robot mode: uint8
-                 */
-                parseBinaryData(buffer) {
-                    const view = new DataView(buffer);
-                    let offset = 0;
-
-                    while (offset + 4 < buffer.byteLength) {
-                        // Find STM32 packet start
-                        if (view.getUint8(offset) !== 0xAA || view.getUint8(offset + 1) !== 0xBB) {
-                            offset++;
-                            continue;
-                        }
-
-                        const pktType = view.getUint8(offset + 2);
-                        const pktLen = view.getUint8(offset + 3);
-
-                        // Validate packet bounds
-                        if (offset + 4 + pktLen + 2 > buffer.byteLength) break;
-
-                        if (pktType === 0x82) { // PKT_TYPE_STATE_DATA
-                            this.parseStatePayload(view, offset + 4, pktLen);
-                        }
-
-                        offset += 4 + pktLen + 2; // Skip to next potential packet
-                    }
-                },
-
-                parseStatePayload(view, offset, len) {
-                    if (len < 45) return; // Need at least 45 bytes for full state
-
-                    // --- IMU data (6 floats, offset+0 to offset+23) ---
-                    const imu = {
-                        ax: view.getFloat32(offset, true),
-                        ay: view.getFloat32(offset + 4, true),
-                        az: view.getFloat32(offset + 8, true),
-                        gx: view.getFloat32(offset + 12, true),
-                        gy: view.getFloat32(offset + 16, true),
-                        gz: view.getFloat32(offset + 20, true),
-                    };
-
-                    // Estimate roll/pitch from accelerometer
-                    this.telemetry.roll = Math.atan2(imu.ay, imu.az) * 180 / Math.PI;
-                    this.telemetry.pitch = Math.atan2(-imu.ax, Math.sqrt(imu.ay * imu.ay + imu.az * imu.az)) * 180 / Math.PI;
-
-                    // --- M0601C data (offset+24 to offset+35) ---
-                    for (let i = 0; i < 2; i++) {
-                        const mi = 4 + i; // motors[4], motors[5]
-                        const mOffset = offset + 24 + i * 6;
-                        this.telemetry.motors[mi].speed = view.getInt16(mOffset, true);
-                        this.telemetry.motors[mi].current = view.getInt16(mOffset + 2, true) / 1000.0; // mA to A
-                        this.telemetry.motors[mi].temp = view.getUint8(mOffset + 4);
-                        this.telemetry.motors[mi].online = view.getUint8(mOffset + 5) !== 0;
-                    }
-
-                    // --- LQR control output (2 floats, offset+36 to offset+43) ---
-                    this.telemetry.control.jointTorque = view.getFloat32(offset + 36, true);
-                    this.telemetry.control.wheelTorque = view.getFloat32(offset + 40, true);
-
-                    // --- Robot mode (offset+44) ---
-                    const mode = view.getUint8(offset + 44);
-                    this.currentMode = ['standing', 'driving', 'sitting', 'jumping', 'emergency', 'calibration'][mode] || 'standing';
-                },
-
-                // --- Commands ---
-                sendToSTM32(cmd) {
-                    if (this.ws && this.wsConnected) {
-                        this.ws.send(JSON.stringify(cmd));
-                    }
-                },
-
-                enableMotors() {
-                    this.sendToSTM32({ type: 'command', cmd: 'enable' });
-                },
-
-                disableMotors() {
-                    this.sendToSTM32({ type: 'command', cmd: 'disable' });
-                },
-
-                setMode(modeId) {
-                    this.currentMode = modeId;
-                    this.sendToSTM32({ type: 'command', cmd: 'set_mode', mode: modeId });
-                },
-
-                sendTuning() {
-                    if (!this.wsConnected) return;
-                    // Debounce - send after 50ms idle
-                    if (this.tuningTimer) clearTimeout(this.tuningTimer);
-                    this.tuningTimer = setTimeout(() => {
-                        this.sendToSTM32({
-                            type: 'tuning',
-                            params: { ...this.params }
-                        });
-                    }, 50);
-                },
-
-                sendM0601CTuning() {
-                    if (!this.wsConnected) return;
-                    // Send M0601C accTime/brake params to both wheels
-                    for (let wheel = 0; wheel < 2; wheel++) {
-                        this.sendToSTM32({
-                            type: 'm0601c_cmd',
-                            motor_idx: wheel,
-                            cmd_type: 0, // accTime
-                            value: this.params.m0601c_acc_time
-                        });
-                    }
-                    this.sendToSTM32({
-                        type: 'm0601c_cmd',
-                        motor_idx: 0,
-                        cmd_type: 1, // brake
-                        value: this.params.m0601c_brake
-                    });
-                },
-
-                testM0601C(speed) {
-                    if (!this.wsConnected) return;
-                    this.sendToSTM32({
-                        type: 'command',
-                        cmd: 'm0601c_speed',
-                        speed: speed,
-                        motor: 'both'
-                    });
-                },
-
-                // --- 3D Animation ---
-                startAnimationLoop() {
-                    const animate = () => {
-                        requestAnimationFrame(animate);
-                        this.controls.update();
-
-                        // Animate robot model based on telemetry
-                        if (this.robotGroup) {
-                            const pitch = this.telemetry.pitch * Math.PI / 180;
-                            this.robotGroup.rotation.x = pitch * 0.5;
-
-                            // Animate legs based on motor positions
-                            for (let i = 0; i < 4 && i < this.telemetry.motors.length; i++) {
-                                const motorData = this.telemetry.motors[i];
-                                if (motorData.position) {
-                                    // Update leg positions when we have real data
-                                }
-                            }
-                        }
-
-                        this.renderer.render(this.scene, this.camera);
-                        this.frameCount++;
-                    };
-                    animate();
-                },
-
-                startFpsCounter() {
-                    this.lastFpsTime = performance.now();
-                    setInterval(() => {
-                        const now = performance.now();
-                        const elapsed = (now - this.lastFpsTime) / 1000;
-                        this.fps = Math.round(this.frameCount / elapsed);
-                        this.frameCount = 0;
-                        this.lastFpsTime = now;
-                    }, 1000);
-                },
-
-                formatUptime(seconds) {
-                    const h = Math.floor(seconds / 3600);
-                    const m = Math.floor((seconds % 3600) / 60);
-                    const s = Math.floor(seconds % 60);
-                    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-                },
+        const state = {
+            ws: null,
+            wsConnected: false,
+            reconnectTimer: null,
+            enabled: false,
+            keys: { w: false, a: false, s: false, d: false },
+            throttle: 0,
+            turn: 0,
+            maxRpm: 220,
+            turnScale: 80,
+            targetLeft: 0,
+            targetRight: 0,
+            packets: 0,
+            lastPacketAt: 0,
+            lastDriveJson: "",
+            lastDriveSentAt: 0,
+        };
+
+        const el = {};
+
+        function bindElements() {
+            [
+                "wsDot", "wsText", "stmText", "packetCount", "driveState",
+                "enableSwitch", "enableText", "throttleValue", "turnValue",
+                "leftTarget", "rightTarget", "maxRpm", "maxRpmValue",
+                "turnScale", "turnScaleValue", "connectButton", "eStopButton",
+                "stopButton", "lastPacketAge", "rollValue", "pitchValue",
+                "yawValue", "jointTorque", "wheelTorque", "modeValue",
+                "leftSpeed", "leftCurrent", "leftTemp", "leftOnline",
+                "rightSpeed", "rightCurrent", "rightTemp", "rightOnline",
+                "lastCommand", "bridgeStatus"
+            ].forEach((id) => {
+                el[id] = document.getElementById(id);
+            });
+        }
+
+        function clamp(value, min, max) {
+            return Math.max(min, Math.min(max, value));
+        }
+
+        function wsUrl() {
+            const host = window.location.hostname || "192.168.4.1";
+            return `ws://${host}/ws`;
+        }
+
+        function setConnection(status, text) {
+            el.wsDot.className = `dot ${status}`;
+            el.wsText.textContent = text;
+        }
+
+        function connectWebSocket() {
+            if (state.ws) {
+                state.ws.onclose = null;
+                state.ws.close();
+            }
+            setConnection("connecting", "连接中");
+
+            try {
+                state.ws = new WebSocket(wsUrl());
+                state.ws.binaryType = "arraybuffer";
+            } catch (error) {
+                scheduleReconnect();
+                return;
+            }
+
+            state.ws.onopen = () => {
+                state.wsConnected = true;
+                setConnection("online", "已连接");
+                requestStatus();
+                sendDrive(true);
+            };
+
+            state.ws.onclose = () => {
+                state.wsConnected = false;
+                setConnection("", "离线");
+                clearKeys();
+                scheduleReconnect();
+            };
+
+            state.ws.onerror = () => {
+                setConnection("", "错误");
+            };
+
+            state.ws.onmessage = (event) => {
+                handleMessage(event.data);
             };
         }
+
+        function scheduleReconnect() {
+            clearTimeout(state.reconnectTimer);
+            state.reconnectTimer = setTimeout(connectWebSocket, 2500);
+        }
+
+        function sendJson(payload) {
+            if (!state.wsConnected || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
+                return false;
+            }
+            state.ws.send(JSON.stringify(payload));
+            el.lastCommand.textContent = `最后命令: ${payload.type}${payload.cmd ? "." + payload.cmd : ""}`;
+            return true;
+        }
+
+        function setEnabled(enabled) {
+            state.enabled = Boolean(enabled);
+            el.enableSwitch.checked = state.enabled;
+            el.enableText.textContent = state.enabled ? "开启" : "关闭";
+            el.driveState.textContent = state.enabled ? "已使能" : "未使能";
+            el.driveState.style.color = state.enabled ? "var(--green)" : "var(--muted)";
+
+            if (state.enabled) {
+                sendJson({ type: "command", cmd: "enable" });
+                sendDrive(true);
+            } else {
+                clearKeys();
+                sendDrive(true);
+                sendJson({ type: "command", cmd: "disable" });
+            }
+        }
+
+        function clearKeys() {
+            Object.keys(state.keys).forEach((key) => {
+                state.keys[key] = false;
+            });
+            updateKeyUi();
+            computeAxes();
+        }
+
+        function updateKeyUi() {
+            document.querySelectorAll("[data-key]").forEach((button) => {
+                const key = button.dataset.key;
+                button.classList.toggle("active", Boolean(state.keys[key]));
+            });
+        }
+
+        function setKey(key, pressed) {
+            if (!(key in state.keys) || state.keys[key] === pressed) {
+                return;
+            }
+            state.keys[key] = pressed;
+            updateKeyUi();
+            computeAxes();
+            sendDrive(true);
+        }
+
+        function computeAxes() {
+            let throttle = 0;
+            if (state.keys.w && !state.keys.s) throttle = 100;
+            if (state.keys.s && !state.keys.w) throttle = -100;
+
+            let turn = 0;
+            if (state.keys.d && !state.keys.a) turn = state.turnScale;
+            if (state.keys.a && !state.keys.d) turn = -state.turnScale;
+
+            state.throttle = throttle;
+            state.turn = turn;
+            state.targetLeft = Math.round(clamp(throttle + turn, -100, 100) * state.maxRpm / 100);
+            state.targetRight = Math.round(clamp(throttle - turn, -100, 100) * state.maxRpm / 100);
+            renderDrive();
+        }
+
+        function renderDrive() {
+            el.throttleValue.textContent = state.throttle;
+            el.turnValue.textContent = state.turn;
+            el.leftTarget.textContent = state.enabled ? state.targetLeft : 0;
+            el.rightTarget.textContent = state.enabled ? state.targetRight : 0;
+        }
+
+        function sendDrive(force = false) {
+            const now = Date.now();
+            const payload = {
+                type: "drive",
+                enable: state.enabled ? 1 : 0,
+                throttle: state.enabled ? state.throttle : 0,
+                turn: state.enabled ? state.turn : 0,
+                max_rpm: state.maxRpm,
+            };
+            const json = JSON.stringify(payload);
+            if (!force && json === state.lastDriveJson && now - state.lastDriveSentAt < 100) {
+                return;
+            }
+            state.lastDriveJson = json;
+            if (sendJson(payload)) {
+                state.lastDriveSentAt = now;
+            }
+        }
+
+        function emergencyStop() {
+            clearKeys();
+            state.enabled = false;
+            el.enableSwitch.checked = false;
+            renderDrive();
+            sendJson({ type: "drive", enable: 0, throttle: 0, turn: 0, max_rpm: state.maxRpm });
+            sendJson({ type: "command", cmd: "disable" });
+            setEnabled(false);
+        }
+
+        function requestStatus() {
+            fetch("/state", { cache: "no-store" })
+                .then((res) => res.json())
+                .then((data) => {
+                    const bridge = data.stm32_bridge || {};
+                    el.stmText.textContent = bridge.uart_ready ? "UART OK" : "UART OFF";
+                    el.bridgeStatus.textContent = `桥接: WS ${bridge.ws_clients || 0}, TX ${bridge.uart_packets_sent || 0}, ERR ${bridge.command_errors || 0}`;
+                })
+                .catch(() => {
+                    el.bridgeStatus.textContent = "桥接: 等待 ESP32";
+                });
+        }
+
+        function handleMessage(data) {
+            state.packets++;
+            state.lastPacketAt = Date.now();
+            el.packetCount.textContent = state.packets;
+
+            if (typeof data === "string") {
+                return;
+            }
+            if (data instanceof Blob) {
+                data.arrayBuffer().then(parseBinary);
+                return;
+            }
+            if (data instanceof ArrayBuffer) {
+                parseBinary(data);
+            }
+        }
+
+        function parseBinary(buffer) {
+            const view = new DataView(buffer);
+            let offset = 0;
+            while (offset + 6 <= buffer.byteLength) {
+                if (view.getUint8(offset) !== 0xAA || view.getUint8(offset + 1) !== 0xBB) {
+                    offset++;
+                    continue;
+                }
+                const type = view.getUint8(offset + 2);
+                const len = view.getUint8(offset + 3);
+                const end = offset + 4 + len + 2;
+                if (end > buffer.byteLength) break;
+
+                if (type === 0x82) parseState(view, offset + 4, len);
+                if (type === 0x81 && len >= 1) parseAck(view.getUint8(offset + 4));
+                offset = end;
+            }
+        }
+
+        function parseAck(code) {
+            el.stmText.textContent = code === 0 ? "ACK OK" : `ACK ${code}`;
+            el.stmText.style.color = code === 0 ? "var(--green)" : "var(--yellow)";
+        }
+
+        function parseState(view, offset, len) {
+            if (len < 45) return;
+
+            const ax = view.getFloat32(offset, true);
+            const ay = view.getFloat32(offset + 4, true);
+            const az = view.getFloat32(offset + 8, true);
+            const gz = view.getFloat32(offset + 20, true);
+
+            const roll = Math.atan2(ay, az) * 180 / Math.PI;
+            const pitch = Math.atan2(-ax, Math.sqrt(ay * ay + az * az)) * 180 / Math.PI;
+            el.rollValue.textContent = roll.toFixed(1);
+            el.pitchValue.textContent = pitch.toFixed(1);
+            el.yawValue.textContent = gz.toFixed(1);
+
+            const leftOffset = offset + 24;
+            const rightOffset = offset + 30;
+            updateWheel("left", view, leftOffset);
+            updateWheel("right", view, rightOffset);
+
+            el.jointTorque.textContent = view.getFloat32(offset + 36, true).toFixed(2);
+            el.wheelTorque.textContent = view.getFloat32(offset + 40, true).toFixed(2);
+            const modeId = view.getUint8(offset + 44);
+            el.modeValue.textContent = ["stand", "drive", "sit", "jump", "stop", "cal"][modeId] || String(modeId);
+        }
+
+        function updateWheel(side, view, offset) {
+            const speed = view.getInt16(offset, true);
+            const current = view.getInt16(offset + 2, true) / 1000;
+            const temp = view.getUint8(offset + 4);
+            const online = view.getUint8(offset + 5) !== 0;
+            el[`${side}Speed`].textContent = speed;
+            el[`${side}Current`].textContent = current.toFixed(2);
+            el[`${side}Temp`].textContent = temp;
+            el[`${side}Online`].textContent = online ? "是" : "否";
+            el[`${side}Online`].className = online ? "online-text" : "offline-text";
+        }
+
+        function initControls() {
+            el.enableSwitch.addEventListener("change", () => setEnabled(el.enableSwitch.checked));
+            el.connectButton.addEventListener("click", connectWebSocket);
+            el.eStopButton.addEventListener("click", emergencyStop);
+            el.stopButton.addEventListener("click", () => {
+                clearKeys();
+                sendDrive(true);
+            });
+
+            el.maxRpm.addEventListener("input", () => {
+                state.maxRpm = Number(el.maxRpm.value);
+                el.maxRpmValue.textContent = state.maxRpm;
+                computeAxes();
+                sendDrive(true);
+            });
+
+            el.turnScale.addEventListener("input", () => {
+                state.turnScale = Number(el.turnScale.value);
+                el.turnScaleValue.textContent = state.turnScale;
+                computeAxes();
+                sendDrive(true);
+            });
+
+            document.querySelectorAll("[data-key]").forEach((button) => {
+                const key = button.dataset.key;
+                button.addEventListener("pointerdown", (event) => {
+                    event.preventDefault();
+                    button.setPointerCapture(event.pointerId);
+                    setKey(key, true);
+                });
+                button.addEventListener("pointerup", () => setKey(key, false));
+                button.addEventListener("pointercancel", () => setKey(key, false));
+                button.addEventListener("pointerleave", () => setKey(key, false));
+            });
+
+            window.addEventListener("keydown", (event) => {
+                const tag = event.target && event.target.tagName;
+                if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+                const key = event.key.toLowerCase();
+                if (key in state.keys) {
+                    event.preventDefault();
+                    setKey(key, true);
+                }
+            });
+
+            window.addEventListener("keyup", (event) => {
+                const key = event.key.toLowerCase();
+                if (key in state.keys) {
+                    event.preventDefault();
+                    setKey(key, false);
+                }
+            });
+
+            window.addEventListener("blur", () => {
+                clearKeys();
+                sendDrive(true);
+            });
+
+            window.addEventListener("beforeunload", () => {
+                if (state.wsConnected) {
+                    sendJson({ type: "drive", enable: 0, throttle: 0, turn: 0, max_rpm: state.maxRpm });
+                }
+            });
+        }
+
+        function tick() {
+            if (state.enabled && state.wsConnected && (state.throttle !== 0 || state.turn !== 0)) {
+                sendDrive(false);
+            }
+            if (state.lastPacketAt) {
+                const age = Math.round((Date.now() - state.lastPacketAt) / 1000);
+                el.lastPacketAge.textContent = `${age}s 前`;
+            }
+        }
+
+        bindElements();
+        initControls();
+        computeAxes();
+        connectWebSocket();
+        setInterval(tick, 120);
+        setInterval(requestStatus, 1200);
     </script>
 </body>
 </html>

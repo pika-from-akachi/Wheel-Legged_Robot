@@ -11,6 +11,12 @@
 
 static const char *TAG = "TELEMETRY_BRIDGE";
 
+#define DRIVE_MAX_RPM_DEFAULT      220
+#define DRIVE_COMMAND_DEADBAND     5
+#define DRIVE_COMMAND_MIN          -100
+#define DRIVE_COMMAND_MAX          100
+#define M0601C_CMD_SPEED           0
+
 typedef struct {
     telemetry_bridge_config_t config;
     telemetry_bridge_status_t status;
@@ -120,6 +126,61 @@ static bool json_get_int(const char *json, const char *key, int *out)
     return true;
 }
 
+static int clamp_int(int value, int min_value, int max_value)
+{
+    if (value < min_value) {
+        return min_value;
+    }
+    if (value > max_value) {
+        return max_value;
+    }
+    return value;
+}
+
+static int16_t clamp_i16(int value)
+{
+    if (value < INT16_MIN) {
+        return INT16_MIN;
+    }
+    if (value > INT16_MAX) {
+        return INT16_MAX;
+    }
+    return (int16_t)value;
+}
+
+static esp_err_t send_m0601c_speed(uint8_t motor_idx, int16_t speed_rpm)
+{
+    uint8_t payload[4] = {
+        motor_idx,
+        M0601C_CMD_SPEED,
+        (uint8_t)(speed_rpm >> 8),
+        (uint8_t)(speed_rpm & 0xFF),
+    };
+    return send_packet(PKT_TYPE_M0601C_CMD, payload, sizeof(payload));
+}
+
+static esp_err_t send_drive_reference(uint8_t enable,
+                                      int16_t throttle,
+                                      int16_t turn,
+                                      int16_t max_rpm)
+{
+    uint8_t payload[7] = {
+        enable,
+        (uint8_t)(throttle >> 8),
+        (uint8_t)(throttle & 0xFF),
+        (uint8_t)(turn >> 8),
+        (uint8_t)(turn & 0xFF),
+        (uint8_t)(max_rpm >> 8),
+        (uint8_t)(max_rpm & 0xFF),
+    };
+    return send_packet(PKT_TYPE_DRIVE_CMD, payload, sizeof(payload));
+}
+
+static esp_err_t send_drive_stop(void)
+{
+    return send_drive_reference(0, 0, 0, 0);
+}
+
 static esp_err_t handle_tuning(const char *json)
 {
     if (strstr(json, "\"params\"") == NULL) {
@@ -181,7 +242,7 @@ static esp_err_t handle_m0601c_speed(const char *json)
         return ESP_ERR_INVALID_ARG;
     }
 
-    int16_t speed_val = (int16_t)speed;
+    int16_t speed_val = clamp_i16(speed);
     int motor_count = 2;
     char motor[16];
     if (json_get_string(json, "motor", motor, sizeof(motor)) &&
@@ -190,18 +251,49 @@ static esp_err_t handle_m0601c_speed(const char *json)
     }
 
     for (int m = 0; m < motor_count; m++) {
-        uint8_t payload[4] = {
-            (uint8_t)m,
-            0,
-            (uint8_t)(speed_val >> 8),
-            (uint8_t)(speed_val & 0xFF),
-        };
-        esp_err_t ret = send_packet(PKT_TYPE_M0601C_CMD, payload, sizeof(payload));
+        esp_err_t ret = send_m0601c_speed((uint8_t)m, speed_val);
         if (ret != ESP_OK) {
             return ret;
         }
     }
     return ESP_OK;
+}
+
+static esp_err_t handle_drive(const char *json)
+{
+    int enable = 0;
+    if (!json_get_int(json, "enable", &enable)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!enable) {
+        return send_drive_stop();
+    }
+
+    int throttle = 0;
+    int turn = 0;
+    int max_rpm = DRIVE_MAX_RPM_DEFAULT;
+    if (!json_get_int(json, "throttle", &throttle) ||
+        !json_get_int(json, "turn", &turn)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    (void)json_get_int(json, "max_rpm", &max_rpm);
+
+    throttle = clamp_int(throttle, DRIVE_COMMAND_MIN, DRIVE_COMMAND_MAX);
+    turn = clamp_int(turn, DRIVE_COMMAND_MIN, DRIVE_COMMAND_MAX);
+    max_rpm = clamp_int(max_rpm, 0, 1000);
+
+    if (abs(throttle) < DRIVE_COMMAND_DEADBAND) {
+        throttle = 0;
+    }
+    if (abs(turn) < DRIVE_COMMAND_DEADBAND) {
+        turn = 0;
+    }
+
+    return send_drive_reference(1,
+                                (int16_t)throttle,
+                                (int16_t)turn,
+                                (int16_t)max_rpm);
 }
 
 static esp_err_t handle_command(const char *json)
@@ -217,6 +309,10 @@ static esp_err_t handle_command(const char *json)
     }
     if (strcmp(cmd, "disable") == 0) {
         uint8_t payload[] = {0};
+        esp_err_t ret = send_drive_stop();
+        if (ret != ESP_OK) {
+            return ret;
+        }
         return send_packet(PKT_TYPE_SET_ENABLE, payload, sizeof(payload));
     }
     if (strcmp(cmd, "set_mode") == 0) {
@@ -224,6 +320,9 @@ static esp_err_t handle_command(const char *json)
     }
     if (strcmp(cmd, "m0601c_speed") == 0) {
         return handle_m0601c_speed(json);
+    }
+    if (strcmp(cmd, "stop") == 0) {
+        return send_drive_stop();
     }
 
     return ESP_ERR_NOT_SUPPORTED;
@@ -297,6 +396,8 @@ esp_err_t telemetry_bridge_handle_ws_text(const uint8_t *data, size_t len)
         ret = handle_tuning(text);
     } else if (strcmp(type, "command") == 0) {
         ret = handle_command(text);
+    } else if (strcmp(type, "drive") == 0) {
+        ret = handle_drive(text);
     } else if (strcmp(type, "m0601c_cmd") == 0) {
         ret = handle_m0601c_cmd(text);
     } else {

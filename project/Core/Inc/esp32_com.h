@@ -60,6 +60,7 @@ extern "C" {
 #define PKT_TYPE_SET_SPEED          0x07    /**< Set target speed */
 #define PKT_TYPE_SET_POSITION       0x08    /**< Set target joint positions */
 #define PKT_TYPE_M0601C_CMD        0x09    /**< M0601C-specific command (accTime/brake) */
+#define PKT_TYPE_DRIVE_CMD          0x0A    /**< Remote drive reference command */
 #define PKT_TYPE_REMOTE_BTN        0x10    /**< Remote controller button event */
 #define PKT_TYPE_SYS_RESET          0x20    /**< System reset command */
 #define PKT_TYPE_FW_VERSION         0x30    /**< Request firmware version */
@@ -86,6 +87,18 @@ extern "C" {
 #define ESP32_ERR_TIMEOUT           0x04
 #define ESP32_ERR_INVALID_PARAM     0x05
 #define ESP32_ERR_DISABLED          0x06
+
+/* ============================================================================
+ *                          DRIVE COMMAND STATE
+ * ============================================================================ */
+
+#define ESP32_DRIVE_TIMEOUT_MS      300U
+
+extern volatile uint8_t  g_esp32_drive_enabled;
+extern volatile int16_t  g_esp32_drive_throttle;     /* -100..100 */
+extern volatile int16_t  g_esp32_drive_turn;         /* -100..100 */
+extern volatile int16_t  g_esp32_drive_max_rpm;      /* 0..1000 */
+extern volatile uint32_t g_esp32_drive_last_tick;
 
 /* ============================================================================
  *                          DATA STRUCTURES
@@ -170,7 +183,7 @@ bool ESP32_COM_IsOnline(void);
 void ESP32_COM_Update(void);
 
 /* CRC */
-uint16_t ESP32_COM_CRC16(uint8_t *data, uint16_t len);
+uint16_t ESP32_COM_CRC16(const volatile uint8_t *data, uint16_t len);
 
 #ifdef __cplusplus
 }

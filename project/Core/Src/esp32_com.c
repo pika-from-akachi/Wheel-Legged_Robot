@@ -6,38 +6,37 @@
   */
 
 #include "esp32_com.h"
-// m0601c stubbed below
 #include "lqr_control.h"
+#include "motor_driver.h"
 #include <string.h>
 
 /* ============================================================================
  *                          EXTERNAL REFERENCES
  * ============================================================================ */
 
-// M0601C stubs
-typedef struct { int speed_rpm; int current_ma; int temperature; } M0601C_Fb;
-typedef struct { M0601C_Fb feedback; int is_online; int mode; } M0601C_MotorHandle_t;
-static M0601C_MotorHandle_t g_m0601c_motors[2];
-#define M0601C_MODE_SPEED 2
-#define M0601C_MODE_CURRENT 1
-static void M0601C_Enable(void *m) { (void)m; }
-static void M0601C_Disable(void *m) { (void)m; }
-static void M0601C_SetMode(void *m, int mode) { (void)m; (void)mode; }
-static void M0601C_SpeedControl(void *m, int v) { (void)m; (void)v; }
-static void M0601C_Brake(void *m) { (void)m; }
-static void M0601C_Idle(void *m) { (void)m; }
-static void M0601C_CurrentControl(void *m, int v) { (void)m; (void)v; }
 extern LQR_Controller_t g_lqr_controller;
 extern volatile uint8_t g_system_status;
+extern volatile float debug_cascade_angle_ref;
+extern volatile float debug_lqr_current_raw;
 
 /* Private variables --------------------------------------------------------*/
 
 static ESP32_COM_t g_esp32;
+static MotorStatus_t g_m0601c_status[2];
+static uint32_t g_m0601c_status_tick[2];
+
+volatile uint8_t  g_esp32_drive_enabled = 0;
+volatile int16_t  g_esp32_drive_throttle = 0;
+volatile int16_t  g_esp32_drive_turn = 0;
+volatile int16_t  g_esp32_drive_max_rpm = 0;
+volatile uint32_t g_esp32_drive_last_tick = 0;
 
 /* Private function prototypes ----------------------------------------------*/
 
 static void ESP32_COM_SendRaw(uint8_t *data, uint16_t len);
 static void ESP32_COM_HandleCommand(ESP32_Packet_t *pkt);
+static void ESP32_COM_UpdateM0601CStatusCache(void);
+static int16_t ESP32_COM_ClampI16(int32_t value, int16_t min_value, int16_t max_value);
 
 /* CRC-16 CCITT table */
 static const uint16_t crc16_table[256] = {
@@ -100,7 +99,7 @@ void ESP32_COM_StartRx(void)
  *                          CRC-16 CCITT
  * ============================================================================ */
 
-uint16_t ESP32_COM_CRC16(uint8_t *data, uint16_t len)
+uint16_t ESP32_COM_CRC16(const volatile uint8_t *data, uint16_t len)
 {
     uint16_t crc = 0xFFFF;
     for (uint16_t i = 0; i < len; i++) {
@@ -117,6 +116,34 @@ static void ESP32_COM_SendRaw(uint8_t *data, uint16_t len)
 {
     if (g_esp32.huart == NULL) return;
     HAL_UART_Transmit(g_esp32.huart, data, len, 100);
+}
+
+static void ESP32_COM_UpdateM0601CStatusCache(void)
+{
+    MotorFeedback_t *feedback = MOTOR_GetFeedback();
+    MotorStatus_t status;
+
+    if (MOTOR_ParseFeedback(feedback, &status) == 0) {
+        return;
+    }
+    if (status.motorId < 1 || status.motorId > 2) {
+        return;
+    }
+
+    uint8_t idx = status.motorId - 1;
+    g_m0601c_status[idx] = status;
+    g_m0601c_status_tick[idx] = HAL_GetTick();
+}
+
+static int16_t ESP32_COM_ClampI16(int32_t value, int16_t min_value, int16_t max_value)
+{
+    if (value < min_value) {
+        return min_value;
+    }
+    if (value > max_value) {
+        return max_value;
+    }
+    return (int16_t)value;
 }
 
 /* ============================================================================
@@ -185,6 +212,7 @@ HAL_StatusTypeDef ESP32_COM_SendStateData(void)
 
     uint8_t data[64];
     uint16_t idx = 0;
+    ESP32_COM_UpdateM0601CStatusCache();
 
     /* --- IMU data (24 bytes) --- */
     memcpy(&data[idx], (void*)&g_imu_accel_x_g, 4); idx += 4;
@@ -196,10 +224,11 @@ HAL_StatusTypeDef ESP32_COM_SendStateData(void)
 
     /* --- M0601C hub motor data (12 bytes) --- */
     for (int i = 0; i < 2; i++) {
-        int16_t speed = g_m0601c_motors[i].feedback.speed_rpm;
-        int16_t current = g_m0601c_motors[i].feedback.current_ma;
-        uint8_t temp = g_m0601c_motors[i].feedback.temperature;
-        uint8_t online = g_m0601c_motors[i].is_online ? 1 : 0;
+        int16_t speed = g_m0601c_status[i].speed;
+        int16_t current = g_m0601c_status[i].current;
+        uint8_t temp = g_m0601c_status[i].temperature;
+        uint8_t online = (g_m0601c_status[i].isValid &&
+                          (HAL_GetTick() - g_m0601c_status_tick[i] < 500U)) ? 1U : 0U;
 
         memcpy(&data[idx], &speed, 2); idx += 2;
         memcpy(&data[idx], &current, 2); idx += 2;
@@ -207,9 +236,9 @@ HAL_StatusTypeDef ESP32_COM_SendStateData(void)
         data[idx++] = online;
     }
 
-    /* --- LQR control output (8 bytes) --- */
-    memcpy(&data[idx], (void*)&g_lqr_controller.u[0], 4); idx += 4;
-    memcpy(&data[idx], (void*)&g_lqr_controller.u[1], 4); idx += 4;
+    /* --- Cascade control output (8 bytes) --- */
+    memcpy(&data[idx], (void*)&debug_cascade_angle_ref, 4); idx += 4;
+    memcpy(&data[idx], (void*)&debug_lqr_current_raw, 4); idx += 4;
 
     /* --- Robot mode (1 byte) --- */
     data[idx++] = (uint8_t)g_lqr_controller.current_mode;
@@ -222,18 +251,20 @@ HAL_StatusTypeDef ESP32_COM_SendMotorFeedback(uint8_t motor_id)
     uint8_t data[8];
     memset(data, 0, sizeof(data));
     data[0] = motor_id;
+    ESP32_COM_UpdateM0601CStatusCache();
 
     /* M0601C motors have IDs 1-2, mapped to array index */
     if (motor_id >= 1 && motor_id <= 2) {
         uint8_t idx = motor_id - 1;
-        int16_t speed = g_m0601c_motors[idx].feedback.speed_rpm;
-        int16_t current = g_m0601c_motors[idx].feedback.current_ma;
+        int16_t speed = g_m0601c_status[idx].speed;
+        int16_t current = g_m0601c_status[idx].current;
 
         memcpy(&data[1], &speed, 2);
         memcpy(&data[3], &current, 2);
-        data[5] = g_m0601c_motors[idx].feedback.temperature;
-        data[6] = g_m0601c_motors[idx].is_online ? 1 : 0;
-        data[7] = g_m0601c_motors[idx].mode;
+        data[5] = g_m0601c_status[idx].temperature;
+        data[6] = (g_m0601c_status[idx].isValid &&
+                   (HAL_GetTick() - g_m0601c_status_tick[idx] < 500U)) ? 1U : 0U;
+        data[7] = g_m0601c_status[idx].mode;
     }
 
     return ESP32_COM_SendPacket(PKT_TYPE_MOTOR_FB, data, 8);
@@ -326,15 +357,20 @@ static void ESP32_COM_HandleCommand(ESP32_Packet_t *pkt)
             uint8_t enable = pkt->payload[0];
             for (int i = 0; i < 2; i++) {
                 if (enable) {
-                    M0601C_Enable(&g_m0601c_motors[i]);
+                    MOTOR_SendModeSwitchCmd((uint8_t)(i + 1), MOTOR_CTRL_CURRENT);
+                    MOTOR_SetCurrent((uint8_t)(i + 1), 0);
                 } else {
-                    M0601C_Disable(&g_m0601c_motors[i]);
+                    MOTOR_SetCurrent((uint8_t)(i + 1), 0);
                 }
             }
             if (enable) {
                 LQR_Enable(&g_lqr_controller);
             } else {
                 LQR_Disable(&g_lqr_controller);
+                g_esp32_drive_enabled = 0;
+                g_esp32_drive_throttle = 0;
+                g_esp32_drive_turn = 0;
+                g_esp32_drive_max_rpm = 0;
             }
             ESP32_COM_SendAck(ESP32_ERR_NONE);
         }
@@ -357,13 +393,11 @@ static void ESP32_COM_HandleCommand(ESP32_Packet_t *pkt)
             RobotMode_e mode = (RobotMode_e)pkt->payload[0];
             if (mode <= ROBOT_MODE_CALIBRATION) {
                 LQR_SetMode(&g_lqr_controller, mode);
-                /* Set M0601C mode: speed mode for driving/standing, idle for sitting */
-                uint8_t m0601c_mode = M0601C_MODE_SPEED;
-                if (mode == ROBOT_MODE_SITTING || mode == ROBOT_MODE_EMERGENCY_STOP) {
-                    m0601c_mode = M0601C_MODE_CURRENT; /* idle/brake */
-                }
                 for (int i = 0; i < 2; i++) {
-                    M0601C_SetMode(&g_m0601c_motors[i], m0601c_mode);
+                    MOTOR_SendModeSwitchCmd((uint8_t)(i + 1), MOTOR_CTRL_CURRENT);
+                    if (mode == ROBOT_MODE_SITTING || mode == ROBOT_MODE_EMERGENCY_STOP) {
+                        MOTOR_SetCurrent((uint8_t)(i + 1), 0);
+                    }
                 }
                 ESP32_COM_SendAck(ESP32_ERR_NONE);
             } else {
@@ -380,20 +414,20 @@ static void ESP32_COM_HandleCommand(ESP32_Packet_t *pkt)
             int16_t value = (int16_t)((pkt->payload[2] << 8) | pkt->payload[3]);
 
             if (motor_idx < 2) {
+                uint8_t motor_id = motor_idx + 1;
                 switch (cmd_type) {
                 case 0: /* Set accTime and send speed control */
-                    /* accTime stored, next speed command will use it */
-                    M0601C_SpeedControl(&g_m0601c_motors[motor_idx], value);
+                    MOTOR_SetSpeed(motor_id, value);
                     break;
                 case 1: /* Brake */
                     if (value) {
-                        M0601C_Brake(&g_m0601c_motors[motor_idx]);
+                        MOTOR_Brake(motor_id);
                     } else {
-                        M0601C_Idle(&g_m0601c_motors[motor_idx]);
+                        MOTOR_Stop(motor_id);
                     }
                     break;
                 case 2: /* Current control */
-                    M0601C_CurrentControl(&g_m0601c_motors[motor_idx], value);
+                    MOTOR_SetCurrent(motor_id, value);
                     break;
                 default:
                     ESP32_COM_SendAck(ESP32_ERR_UNKNOWN_CMD);
@@ -413,11 +447,30 @@ static void ESP32_COM_HandleCommand(ESP32_Packet_t *pkt)
             uint8_t mid = pkt->payload[0];
             int16_t speed = (int16_t)((pkt->payload[1] << 8) | pkt->payload[2]);
             if (mid >= 1 && mid <= 2) {
-                M0601C_SpeedControl(&g_m0601c_motors[mid - 1], speed);
+                MOTOR_SetSpeed(mid, speed);
                 ESP32_COM_SendAck(ESP32_ERR_NONE);
             } else {
                 ESP32_COM_SendAck(ESP32_ERR_INVALID_PARAM);
             }
+        }
+        break;
+    }
+
+    case PKT_TYPE_DRIVE_CMD: {
+        if (pkt->length >= 7) {
+            uint8_t enable = pkt->payload[0] ? 1U : 0U;
+            int16_t throttle = (int16_t)((pkt->payload[1] << 8) | pkt->payload[2]);
+            int16_t turn = (int16_t)((pkt->payload[3] << 8) | pkt->payload[4]);
+            int16_t max_rpm = (int16_t)((pkt->payload[5] << 8) | pkt->payload[6]);
+
+            g_esp32_drive_enabled = enable;
+            g_esp32_drive_throttle = ESP32_COM_ClampI16(throttle, -100, 100);
+            g_esp32_drive_turn = ESP32_COM_ClampI16(turn, -100, 100);
+            g_esp32_drive_max_rpm = ESP32_COM_ClampI16(max_rpm, 0, 1000);
+            g_esp32_drive_last_tick = HAL_GetTick();
+            ESP32_COM_SendAck(ESP32_ERR_NONE);
+        } else {
+            ESP32_COM_SendAck(ESP32_ERR_INVALID_PARAM);
         }
         break;
     }

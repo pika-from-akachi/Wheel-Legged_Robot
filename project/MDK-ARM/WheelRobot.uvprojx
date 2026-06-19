@@ -607,6 +607,11 @@
               <FileType>1</FileType>
               <FilePath>../Core/Src/robot_model.c</FilePath>
             </File>
+            <File>
+              <FileName>esp32_com.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/esp32_com.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
