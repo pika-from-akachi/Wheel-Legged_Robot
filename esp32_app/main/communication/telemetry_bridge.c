@@ -250,6 +250,31 @@ static esp_err_t handle_m0601c_cmd(const char *json)
     return send_packet(PKT_TYPE_M0601C_CMD, payload, sizeof(payload));
 }
 
+static esp_err_t handle_drive(const char *json)
+{
+    int fwd = 0, yaw = 0;
+    if (!json_get_int(json, "fwd", &fwd) || !json_get_int(json, "yaw", &yaw)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* 单包: [fwd_hi, fwd_lo, yaw_hi, yaw_lo] via PKT_TYPE_SET_SPEED(0x07) */
+    int16_t f = (int16_t)fwd, y = (int16_t)yaw;
+    if (f > 127) f = 127; if (f < -127) f = -127;
+    if (y > 127) y = 127; if (y < -127) y = -127;
+    uint8_t pl[4] = {(uint8_t)(f >> 8), (uint8_t)(f & 0xFF),
+                     (uint8_t)(y >> 8), (uint8_t)(y & 0xFF)};
+    return send_packet(PKT_TYPE_SET_SPEED, pl, sizeof(pl));
+}
+
+static esp_err_t handle_light(const char *json)
+{
+    int on = 0;
+    if (!json_get_int(json, "on", &on)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    light_pwm_set_mode(on ? LIGHT_PWM_MODE_ON : LIGHT_PWM_MODE_OFF);
+    return ESP_OK;
+}
+
 esp_err_t telemetry_bridge_init(const telemetry_bridge_config_t *config)
 {
     if (config == NULL || config->ws_send == NULL) {
@@ -299,6 +324,10 @@ esp_err_t telemetry_bridge_handle_ws_text(const uint8_t *data, size_t len)
         ret = handle_command(text);
     } else if (strcmp(type, "m0601c_cmd") == 0) {
         ret = handle_m0601c_cmd(text);
+    } else if (strcmp(type, "drive") == 0) {
+        ret = handle_drive(text);
+    } else if (strcmp(type, "light") == 0) {
+        ret = handle_light(text);
     } else {
         ret = ESP_ERR_NOT_SUPPORTED;
     }
