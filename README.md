@@ -2,7 +2,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-STM32F407-blue.svg)](https://www.st.com/en/microcontrollers-microprocessors/stm32f407-417.html)
 [![Framework](https://img.shields.io/badge/Framework-STM32CubeMX_6.15.0-green.svg)](https://www.st.com/en/development-tools/stm32cubemx.html)
-[![RTOS](https://img.shields.io/badge/RTOS-FreeRTOS_V10.6.2-orange.svg)](https://www.freertos.org)
+[![RTOS](https://img.shields.io/badge/RTOS-FreeRTOS_V10.3.1-orange.svg)](https://www.freertos.org)
 [![Language](https://img.shields.io/badge/Language-C-orange.svg)](https://en.wikipedia.org/wiki/C_(programming_language))
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -18,7 +18,7 @@ This project implements the embedded control system for a wheel-legged robot, de
 
 ### Key Features
 
-- **Real-Time Operating System**: FreeRTOS V10.6.2 with 7 priority-based tasks
+- **Real-Time Operating System**: FreeRTOS V10.3.1 with 8 priority-based tasks (6 active, 2 disabled)
 - **Interrupt-Driven IMU**: ICM-42688-P read by TIM2 hardware interrupt (1 kHz, deterministic timing)
 - **Multi-Motor Support**: EL05 joint motor (CAN extended frame), M0601C wheel motor (RS485)
 - **Dual Wheel Drive**: Left wheel (ID=1) and right wheel (ID=2) with differential speed control
@@ -96,7 +96,7 @@ IRQ         ───►   PC7 (optional)
 - New address after pairing: `"HXFB1"`
 - RF Channel: 25 (2.425GHz)
 - Payload width: 16 bytes
-- Auto-retransmit: 8 retries, 2000µs delay
+- Auto-retransmit: 8 retries, 2250µs delay
 
 #### EL05 Quasi-Direct-Drive Motor (CAN Extended Frame) - Joint Motor
 
@@ -182,19 +182,20 @@ int main(void) {
 
 ## FreeRTOS Task Architecture
 
-This project uses **FreeRTOS V10.6.2** with a comprehensive task-based architecture for real-time control.
-
-### Task Overview
+This project uses **FreeRTOS V10.3.1** with a comprehensive task-based architecture for real-time control.
 
 ### Task Overview
 
 | Task | Hardware | Frequency | Priority | Stack | Description |
 |------|----------|-----------|----------|-------|-------------|
-| **IMU** | ICM-42688-P | 1kHz | Medium | 1KB | IMU data processing (raw read by TIM2 ISR) |
-| **Remote** | NRF24L01+ | 100Hz | High | 2KB | Remote controller data reading |
-| **EL05 Motor** | EL05 (CAN) + M0601C (RS485) | 10Hz | Medium | 2KB | **Single task**: 4 joint motors (Action Group 0) + both wheel motors (ID=1 forward, ID=2 reverse) |
-| **Monitor** | System Safety | 10Hz | Low | 1KB | System status monitoring |
-| **Debug** | Diagnostics | 1Hz | Lowest | 1KB | Debug output |
+| **IMU** | ICM-42688-P | 1kHz (ISR唤醒) | AboveNormal | 4KB | IMU data processing (raw read by TIM2 ISR) |
+| **Remote** | NRF24L01+ | 100Hz | AboveNormal1 | 8KB | Remote controller data reading |
+| **EL05 Motor** | EL05 (CAN) + M0601C (RS485) | 10Hz | AboveNormal | 8KB | **Single task**: 4 joint motors + both wheel motors |
+| **Balance** | IMU + LQR | 200Hz | AboveNormal2 | 16KB | LQR balance control (IMU→filter→LQR→motors) |
+| **Monitor** | System Safety | 10Hz | BelowNormal | 4KB | System status monitoring |
+| **Debug** | Diagnostics | 1Hz | Low | 4KB | Debug output |
+| ~~M0601C Motor~~ | M0601C (RS485) | (disabled) | - | - | Wheels controlled within EL05 Motor task |
+| ~~CAN~~ | CAN Bus | (disabled) | - | - | CAN processing merged into EL05 Motor task |
 
 ### Task Communication
 
@@ -212,19 +213,15 @@ This project uses **FreeRTOS V10.6.2** with a comprehensive task-based architect
                                                     ▼
 ┌─────────┐                              ┌──────────┐
 │ Remote  │──────────queue──────────────►│ Balance  │──┐
-│ (100Hz) │                              │ (500Hz)  │  │
+│ (100Hz) │                              │ (200Hz)  │  │
 └─────────┘                              └──────────┘  │
                                                       │
                                     ┌─────────────────┘
                                     ▼
                              ┌──────────────┐
-                        ┌───►│ EL05 Motor   │
-                        │    │ (100Hz, CAN) │
-                        │    └──────────────┘
-                        │
-                        │    ┌──────────────┐
-                        └───►│ M0601C Motor │
-                             │ (100Hz, UART)│
+                             │ EL05 Motor   │
+                             │ (10Hz, CAN + │
+                             │  RS485)      │
                              └──────────────┘
 ```
 
@@ -232,10 +229,11 @@ This project uses **FreeRTOS V10.6.2** with a comprehensive task-based architect
 
 | Resource | Mutex | Protected Tasks |
 |----------|-------|-----------------|
-| CAN Bus | `mutex_CAN` | Motor, LQR, Balance |
+| CAN Bus | `mutex_CAN` | EL05 Motor, Balance |
+| SPI1 (IMU) | `mutex_SPI1` | IMU (guard configuration) |
 | SPI3 (NRF24L01) | `mutex_SPI3` | Remote |
-| UART1 / RS485 (M0601C) | `mutex_RS485` | Motor |
-| UART3 (ESP32) | `mutex_UART_ESP32` | ESP32_COM |
+| UART1 / RS485 (M0601C) | `mutex_UART1` | EL05 Motor |
+| UART3 (ESP32) | `mutex_UART3` | ESP32_COM (if enabled) |
 
 > **Note**: SPI1 (IMU) is accessed only from TIM2 ISR context — no mutex needed. Register-level SPI with loop timeout avoids HAL SysTick dependency.
 
@@ -272,7 +270,7 @@ Where `θ = body_angle`, `ω = body_rate`, `pos = wheel_position`, `vel = wheel_
 | **Kpos** | **+0.1** | Nm/rad | Wheel position loop / 位置环 |
 | **Kv** | **+2.7** | Nm/(rad/s) | Wheel velocity loop / 速度环 |
 | **Ki** | **3.0** | Nm/(rad·s) | Integral gain (limit ±0.3 Nm) / 积分增益(限幅0.3) |
-| g_accel_offset | 3.089 | rad | IMU balance zero (177°) / IMU平衡零点 |
+| g_accel_offset | 3.096 | rad | IMU balance zero (177.4°) / IMU平衡零点 |
 
 > **Note:** Positive gains verified by motor direction test. `u = -(K·x)` → forward tilt (θ>0) produces negative torque → wheel forward → correction.
 > **注:** 正增益经由电机方向测试验证。前倾(θ>0)→负扭矩→轮子向前→修正。
@@ -281,7 +279,8 @@ Where `θ = body_angle`, `ω = body_rate`, `pos = wheel_position`, `vel = wheel_
 
 ```
 body_angle = complementary_filter(gyro_integral, accel_angle)
-           = 0.90·(angle + gyro·dt) + 0.10·atan2(accel_y, accel_z)
+           = α·(angle + gyro·dt) + (1-α)·atan2(accel_y, accel_z)
+           where α = 0.90 (freertos.c) or 0.98 (freertos_tasks.c)
 
 body_rate  = gyro_x (negated for X/Z-flipped IMU)
 
@@ -292,7 +291,7 @@ wheel_pos  = ∫ wheel_vel · dt  (×0.999 decay)
 ### IMU Calibration | IMU校准
 
 1. Z-up orientation verified by 3-pose test (upright, forward-tilt, backward-tilt)
-2. `g_accel_offset = atan2(ay, az) at upright ≈ π` (hardcoded to 3.089 rad / 177°)
+2. `g_accel_offset = atan2(ay, az) at upright ≈ π` (hardcoded to 3.096 rad / 177.4°)
 3. Gyro bias set to 0 (complementary filter auto-converges)
 4. Motor-task auto-calibration disabled (offset is hardcoded)
 
@@ -312,12 +311,12 @@ wheel_pos  = ∫ wheel_vel · dt  (×0.999 decay)
 
 | File | Description |
 |:-----|:------------|
-| `Core/Inc/lqr_control.h` | LQR controller API + default parameters |
-| `Core/Src/lqr_control.c` | LQR implementation (state feedback + integral) |
-| `Core/Inc/robot_model.h` | Robot kinematics, state definitions |
-| `Core/Src/robot_model.c` | Gain matrix K[2][4], linearized dynamics |
-| `Core/Src/freertos.c` | Task_Balance (200Hz): IMU→filter→LQR→motors |
-| `Core/Src/icm42688.c` | ICM-42688-P IMU driver (SPI, 1kHz ISR) |
+| `project/Core/Inc/lqr_control.h` | LQR controller API + default parameters |
+| `project/Core/Src/lqr_control.c` | LQR implementation (state feedback + integral) |
+| `project/Core/Inc/robot_model.h` | Robot kinematics, state definitions |
+| `project/Core/Src/robot_model.c` | Gain matrix K[2][4], linearized dynamics |
+| `project/Core/Src/freertos.c` | Task_Balance (200Hz): IMU→filter→LQR→motors |
+| `project/Core/Src/icm42688.c` | ICM-42688-P IMU driver (SPI, 1kHz ISR) |
 
 ### Safety | 安全
 
@@ -382,8 +381,22 @@ UART3 packet format (binary):
 - `0x02` - Request robot state
 - `0x03` - Set control mode
 - `0x04` - Enable/Disable motors
+- `0x05` - Direct motor command
 - `0x06` - Heartbeat
+- `0x07` - Set target speed (web remote)
+- `0x08` - Set target joint positions
+- `0x09` - M0601C-specific command
+- `0x10` - Remote controller button event
 - `0x20` - System reset
+- `0x30` - Firmware version query
+
+**Response types:**
+- `0x81` - ACK
+- `0x82` - State data (45-byte: 24 IMU + 12 M0601C + 8 LQR + 1 mode)
+- `0x83` - Tuning data
+- `0x84` - Motor feedback
+- `0x8F` - Error
+- `0xF0` - Debug stream
 
 ### Key Files
 
@@ -510,25 +523,28 @@ void Task_EL05_Motor(void *argument) {
 - **CPU Utilization**: ~20% (highly efficient)
 - **IMU Read**: 1kHz hardware-timed by TIM2 ISR (deterministic, ±0 µs jitter)
 - **IMU Processing**: 1kHz (software filtering in Task_IMU)
-- **Balance Control**: 500Hz (real-time response)
-- **Motor Control**: 100Hz (precise control)
-- **FreeRTOS Heap**: 32KB
-- **Total Stack**: ~14KB for all tasks
+- **Balance Control**: 200Hz (real-time response)
+- **Motor Control**: 10Hz (joint position hold loop)
+- **FreeRTOS Heap**: 32KB (heap_4)
+- **Total Stack**: ~45KB for active tasks (11,264 words × 4 bytes)
 
 ### Monitoring Variables
 
 Debug counters available in Keil Watch window:
 
 ```c
-g_imu_update_count           // Should increase by 1000 per second
-g_remote_update_count        // Should increase by 100 per second
-g_el05_motor_update_count    // Should increase by 10 per second
-g_can_tx_count               // CAN TX message count
-g_can_rx_count               // CAN RX message count
-g_system_status              // 0 = all systems normal
-debug_wheel_cmd_status       // Left wheel (ID=1) cmd: 1=OK, 2=fail
-debug_right_wheel_status     // Right wheel (ID=2) cmd: 1=OK, 2=fail
-dr0                          // RS485 feedback frame DATA[0] = motor ID
+g_imu_update_count            // Should increase by 1000 per second
+g_remote_update_count         // Should increase by 100 per second
+g_el05_motor_update_count     // Should increase by 10 per second
+g_m0601c_motor_update_count   // M0601C motor control counter
+g_can_tx_count                // CAN TX message count
+g_can_rx_count                // CAN RX message count
+g_system_status               // 0 = all systems normal
+debug_wheel_cmd_status        // Left wheel (ID=1) cmd: 1=OK, 2=fail
+debug_right_wheel_status      // Right wheel (ID=2) cmd: 1=OK, 2=fail
+dr0                           // RS485 feedback frame DATA[0] = motor ID
+g_can_esr                     // CAN Error Status Register (0 = OK)
+g_can_tsr                     // CAN Transmit Status Register
 ```
 
 For detailed FreeRTOS configuration, see [FREERTOS_CONFIG.md](FREERTOS_CONFIG.md).
@@ -539,56 +555,43 @@ For detailed FreeRTOS configuration, see [FREERTOS_CONFIG.md](FREERTOS_CONFIG.md
 
 ```
 Wheel-Legged_Robot/
-├── Core/                              # Main application code
-│   ├── Inc/                           # Header files
+├── project/Core/                       # Main application code
+│   ├── Inc/                            # Header files
 │   │   ├── main.h
 │   │   ├── can.h
+│   │   ├── freertos_tasks.h
+│   │   ├── lqr_control.h
+│   │   ├── robot_model.h
+│   │   ├── esp32_com.h
+│   │   ├── el05_motor.h
+│   │   ├── m0601c_motor.h
+│   │   ├── icm42688.h
+│   │   ├── nrf24l01_rx.h
 │   │   └── gpio.h
-│   └── Src/                           # Source files
-│       ├── main.c                     # Main entry point
-│       ├── can.c                      # CAN initialization
-│       └── gpio.c                     # GPIO configuration
+│   └── Src/                            # Source files
+│       ├── main.c                      # Main entry point
+│       ├── freertos.c                  # FreeRTOS task creation
+│       ├── freertos_tasks.c            # Task implementations
+│       ├── can.c                       # CAN initialization
+│       ├── lqr_control.c               # LQR balance controller
+│       ├── robot_model.c               # Robot kinematics & dynamics
+│       ├── esp32_com.c                 # ESP32 UART protocol
+│       ├── el05_motor.c                # EL05 CAN motor driver
+│       ├── m0601c_motor.c              # M0601C RS485 motor driver
+│       ├── icm42688.c                  # ICM-42688-P IMU driver
+│       ├── nrf24l01_rx.c               # NRF24L01+ receiver
+│       └── gpio.c                      # GPIO configuration
 │
-├── Motor_Drivers/                     # Motor driver modules
-│   ├── EL05_MOTOR_DRIVE/              # EL05 CAN motor driver
-│   │   ├── Core/
-│   │   │   ├── Inc/
-│   │   │   │   ├── el05_motor.h       # EL05 driver API
-│   │   │   │   └── can_rx_handler.h   # CAN RX handler
-│   │   │   └── Src/
-│   │   │       ├── el05_motor.c       # EL05 implementation
-│   │   │       ├── can_rx_handler.c   # Feedback parsing
-│   │   │       └── main_example.c     # Usage examples
-│   │   └── EL05电机驱动使用指南.md     # Chinese documentation
-│   │
-│   ├── M0601C_DRIVE/                  # M0601C UART motor driver
-│   │   ├── Core/
-│   │   │   ├── Inc/
-│   │   │   │   └── motor_driver.h     # M0601C driver API
-│   │   │   └── Src/
-│   │   │       └── motor_driver.c     # M0601C implementation
-│   │   └── *.md                       # Documentation files
-│   │
-│   └── NRF24L01_DRIVER/               # NRF24L01+ wireless module driver
-│       ├── Core/
-│       │   ├── Inc/
-│       │   │   └── nrf24l01.h         # NRF24L01 driver API
-│       │   └── Src/
-│       │       ├── nrf24l01.c         # NRF24L01 implementation
-│       │       └── nrf24l01_example.c # Usage examples
-│       └── README.md                  # Documentation
-│
-├── Drivers/                           # STM32 HAL & CMSIS libraries
-├── MDK-ARM/                           # Keil MDK project files
-├── EWARM/                             # IAR EWARM project files
+├── project/Drivers/                    # STM32 HAL & CMSIS libraries
+├── project/MDK-ARM/                    # Keil MDK project files
 ### Key Files Added in v2.0 (LQR + Wireless Tuning):
 
 | File | Description |
 |------|-------------|
-| `Core/Inc/m0601c_motor.h` / `Core/Src/m0601c_motor.c` | M0601C RS485 motor driver with CRC-8 |
-| `Core/Inc/lqr_control.h` / `Core/Src/lqr_control.c` | LQR control algorithm framework |
-| `Core/Inc/robot_model.h` / `Core/Src/robot_model.c` | Robot kinematics and dynamics model |
-| `Core/Inc/esp32_com.h` / `Core/Src/esp32_com.c` | ESP32 UART communication protocol |
+| `project/Core/Inc/lqr_control.h` / `project/Core/Src/lqr_control.c` | LQR control algorithm framework |
+| `project/Core/Inc/robot_model.h` / `project/Core/Src/robot_model.c` | Robot kinematics and dynamics model |
+| `project/Core/Inc/esp32_com.h` / `project/Core/Src/esp32_com.c` | ESP32 UART communication protocol |
+| `project/Core/Inc/m0601c_motor.h` / `project/Core/Src/m0601c_motor.c` | M0601C RS485 motor driver with CRC-8 |
 | `esp32_app/main/main.c` | ESP32-S3 firmware (WiFi AP + WebSocket) |
 | `esp32_app/data/index.html` | Alpine.js + Three.js web tuning UI |
 
@@ -614,17 +617,17 @@ GND          ───►   GND
 Note: Add 120Ω termination resistor at both ends of CAN bus
 ```
 
-**M0601C Motor (RS485):**
+**M0601C Motor (RS485 via USART2):**
 ```
-M0601C Motor        STM32F407 (USART1 + RS485)
+M0601C Motor        STM32F407 (USART2 + THVD1410DR)
 ───────────────────────────────────────────
-RS485_A      ───►   TX (PB6)
-RS485_B      ───►   RX (PB7)
-DIR                  PE0 (DE/RE control)
+RS485_A      ───►   A (PD6, via THVD1410DR)
+RS485_B      ───►   B (PD5, via THVD1410DR)
 GND          ───►   GND
+RE/DE control       PD3 (RE#), PD4 (DE)
 
-Note: USART1 configured as RS485 half-duplex at 115200 baud
-      PE0 = HIGH for transmit, LOW for receive
+Note: USART2 configured as RS485 half-duplex at 115200 baud
+      THVD1410DR: PD3=RE# (LOW=receive), PD4=DE (HIGH=transmit)
 ```
 
 **ESP32-S3 (Wireless Tuning Module):**
@@ -846,8 +849,8 @@ Output Torque = Kp × (p_des - p_actual) + Kd × (v_des - v_actual) + t_ff
 
 | Parameter | Range | Unit |
 |-----------|-------|------|
-| p_des | -12.5 ~ 12.5 | rad |
-| v_des | -30 ~ 30 | rad/s |
+| p_des | -12.57 ~ 12.57 | rad |
+| v_des | -50 ~ 50 | rad/s |
 | kp | 0 ~ 500 | - |
 | kd | 0 ~ 5 | - |
 | t_ff | -6 ~ 6 | N·m |
@@ -909,8 +912,8 @@ Output Torque = Kp × (p_des - p_actual) + Kd × (v_des - v_actual) + t_ff
 
 ## References
 
-- [EL05 Motor User Manual](Motor_Drivers/EL05_MOTOR_DRIVE/EL05电机驱动使用指南.md)
-- [NRF24L01+ Wireless Module Driver](Motor_Drivers/NRF24L01_DRIVER/README.md)
+- [EL05 Motor User Manual](project/Core/Inc/el05_motor.h)
+- [NRF24L01+ Wireless Module Driver](project/Core/Inc/nrf24l01_rx.h)
 - [STM32F407 Reference Manual (RM0090)](https://www.st.com/resource/en/reference_manual/dm00031051.pdf)
 - [CAN Protocol Specification](https://www.can-cia.org/)
 
@@ -944,7 +947,7 @@ This project is developed for educational purposes as part of the 2026 Mingyue C
 
 ### 主要特性
 
-- **实时操作系统**：FreeRTOS V10.6.2，7个优先级任务
+- **实时操作系统**：FreeRTOS V10.3.1，8个优先级任务（6个活跃，2个禁用）
 - **中断驱动IMU**：ICM-42688-P由TIM2硬件中断读取（1kHz，确定性时序）
 - **多电机支持**：EL05关节电机（CAN扩展帧）、M0601C轮毂电机（RS485）
 - **双轮差速驱动**：左轮(ID=1)正转前进，右轮(ID=2)反转前进
@@ -1007,7 +1010,7 @@ IRQ         ───►   PC7 (可选)
 - 对码后新地址：`"HXFB1"`
 - RF通道：25 (2.425GHz)
 - 负载宽度：16字节
-- 自动重传：8次重试，2000µs延时
+- 自动重传：8次重试，2250µs延时
 
 #### EL05 准直驱电机（CAN扩展帧）
 
@@ -1091,17 +1094,20 @@ int main(void) {
 
 ## FreeRTOS任务架构
 
-本项目使用**FreeRTOS V10.6.2**，采用基于任务的架构实现实时控制。
+本项目使用**FreeRTOS V10.3.1**，采用基于任务的架构实现实时控制。
 
 ### 任务概览
 
 | 任务 | 硬件 | 频率 | 优先级 | 栈大小 | 描述 |
 |------|------|------|--------|--------|------|
-| **IMU** | ICM-42688-P | 1kHz | 中 | 1KB | IMU数据处理（原始读取由TIM2 ISR完成） |
-| **Remote** | NRF24L01+ | 100Hz | 高 | 2KB | 遥控器数据读取 |
-| **EL05 Motor** | EL05 (CAN) + M0601C (RS485) | 10Hz | 中 | 2KB | **单任务**: 4个关节电机(动作组0) + 左右轮毂电机(ID=1正转, ID=2反转) |
-| **Monitor** | 系统安全 | 10Hz | 低 | 1KB | 系统状态监控 |
-| **Debug** | 诊断输出 | 1Hz | 最低 | 1KB | 调试输出 |
+| **IMU** | ICM-42688-P | 1kHz (ISR唤醒) | AboveNormal | 4KB | IMU数据处理（原始读取由TIM2 ISR完成） |
+| **Remote** | NRF24L01+ | 100Hz | AboveNormal1 | 8KB | 遥控器数据读取 |
+| **EL05 Motor** | EL05 (CAN) + M0601C (RS485) | 10Hz | AboveNormal | 8KB | **单任务**: 4个关节电机 + 左右轮毂电机 |
+| **Balance** | IMU + LQR | 200Hz | AboveNormal2 | 16KB | LQR平衡控制 (IMU→滤波→LQR→电机) |
+| **Monitor** | 系统安全 | 10Hz | BelowNormal | 4KB | 系统状态监控 |
+| **Debug** | 诊断输出 | 1Hz | Low | 4KB | 调试输出 |
+| ~~M0601C Motor~~ | M0601C (RS485) | (已禁用) | - | - | 轮毂控制已合并到EL05 Motor任务 |
+| ~~CAN~~ | CAN总线 | (已禁用) | - | - | CAN处理已合并到EL05 Motor任务 |
 
 ### 任务通信
 
@@ -1119,19 +1125,15 @@ int main(void) {
                                                     ▼
 ┌─────────┐                              ┌──────────┐
 │ Remote  │──────────队列───────────────►│ Balance  │──┐
-│ (100Hz) │                              │ (500Hz)  │  │
+│ (100Hz) │                              │ (200Hz)  │  │
 └─────────┘                              └──────────┘  │
                                                       │
                                     ┌─────────────────┘
                                     ▼
                              ┌──────────────┐
-                        ┌───►│ EL05 Motor   │
-                        │    │ (100Hz, CAN) │
-                        │    └──────────────┘
-                        │
-                        │    ┌──────────────┐
-                        └───►│ M0601C Motor │
-                             │ (100Hz, UART)│
+                             │ EL05 Motor   │
+                             │ (10Hz, CAN + │
+                             │  RS485)      │
                              └──────────────┘
 ```
 
@@ -1139,9 +1141,10 @@ int main(void) {
 
 | 资源 | 互斥量 | 保护任务 |
 |------|--------|----------|
-| CAN总线 | `mutex_CAN` | EL05_Motor, CAN |
+| CAN总线 | `mutex_CAN` | EL05 Motor, Balance |
+| SPI1 (IMU) | `mutex_SPI1` | IMU (配置保护) |
 | SPI3 (NRF24L01) | `mutex_SPI3` | Remote |
-| UART1 (M0601C) | `mutex_UART1` | M0601C_Motor |
+| UART1 / RS485 (M0601C) | `mutex_UART1` | EL05 Motor |
 
 > **注意**：SPI1（IMU）仅在TIM2 ISR上下文中访问，无需互斥量保护。寄存器级SPI配合循环超时，不依赖HAL SysTick。
 
@@ -1150,10 +1153,10 @@ int main(void) {
 - **CPU利用率**：~20%（高效）
 - **IMU读取**：1kHz由TIM2硬件定时（确定性，±0 µs抖动）
 - **IMU处理**：1kHz（Task_IMU中软件滤波）
-- **平衡控制**：500Hz（实时响应）
-- **电机控制**：100Hz（精确控制）
-- **FreeRTOS堆**：32KB
-- **总栈大小**：~14KB（所有任务）
+- **平衡控制**：200Hz（实时响应）
+- **电机控制**：10Hz（关节位置保持循环）
+- **FreeRTOS堆**：32KB（heap_4）
+- **总栈大小**：~45KB（活跃任务，11,264 words × 4字节）
 
 ### 监控变量
 
@@ -1179,40 +1182,36 @@ dr0                          // RS485反馈帧DATA[0] = 电机ID
 
 ```
 Wheel-Legged_Robot/
-├── Core/                              # 主应用代码
-│   ├── Inc/                           # 头文件
+├── project/Core/                       # 主应用代码
+│   ├── Inc/                            # 头文件
 │   │   ├── main.h
 │   │   ├── can.h
+│   │   ├── freertos_tasks.h
+│   │   ├── lqr_control.h
+│   │   ├── robot_model.h
+│   │   ├── esp32_com.h
+│   │   ├── el05_motor.h
+│   │   ├── m0601c_motor.h
+│   │   ├── icm42688.h
+│   │   ├── nrf24l01_rx.h
 │   │   └── gpio.h
-│   └── Src/                           # 源文件
-│       ├── main.c                     # 主程序入口
-│       ├── can.c                      # CAN初始化
-│       └── gpio.c                     # GPIO配置
+│   └── Src/                            # 源文件
+│       ├── main.c                      # 主程序入口
+│       ├── freertos.c                  # FreeRTOS任务创建
+│       ├── freertos_tasks.c            # 任务实现
+│       ├── can.c                       # CAN初始化
+│       ├── lqr_control.c               # LQR平衡控制
+│       ├── robot_model.c               # 机器人运动学与动力学
+│       ├── esp32_com.c                 # ESP32 UART协议
+│       ├── el05_motor.c                # EL05 CAN电机驱动
+│       ├── m0601c_motor.c              # M0601C RS485电机驱动
+│       ├── icm42688.c                  # ICM-42688-P IMU驱动
+│       ├── nrf24l01_rx.c               # NRF24L01+ 接收器
+│       └── gpio.c                      # GPIO配置
 │
-├── Motor_Drivers/                     # 电机驱动模块
-│   ├── EL05_MOTOR_DRIVE/              # EL05 CAN电机驱动
-│   │   ├── Core/
-│   │   │   ├── Inc/
-│   │   │   │   ├── el05_motor.h       # EL05驱动API
-│   │   │   │   └── can_rx_handler.h   # CAN接收处理
-│   │   │   └── Src/
-│   │   │       ├── el05_motor.c       # EL05实现
-│   │   │       ├── can_rx_handler.c   # 反馈解析
-│   │   │       └── main_example.c     # 使用示例
-│   │   └── EL05电机驱动使用指南.md     # 中文文档
-│   │
-│   └── M0601C_DRIVE/                  # M0601C UART电机驱动
-│       ├── Core/
-│       │   ├── Inc/
-│       │   │   └── motor_driver.h     # M0601C驱动API
-│       │   └── Src/
-│       │       └── motor_driver.c     # M0601C实现
-│       └── *.md                       # 文档文件
-│
-├── Drivers/                           # STM32 HAL及CMSIS库
-├── MDK-ARM/                           # Keil MDK工程文件
-├── EWARM/                             # IAR EWARM工程文件
-└── WheelRobot.ioc                     # STM32CubeMX配置文件
+├── project/Drivers/                    # STM32 HAL及CMSIS库
+├── project/MDK-ARM/                    # Keil MDK工程文件
+└── WheelRobot.ioc                      # STM32CubeMX配置文件
 ```
 
 ---
@@ -1294,13 +1293,17 @@ GND          ───►   GND
 注意：CAN总线两端需加120Ω终端电阻
 ```
 
-**M0601C电机（UART）：**
+**M0601C电机（RS485 via USART2）：**
 ```
-M0601C电机          STM32F407
-─────────────────────────────
-TX           ───►   USART1_RX (PB7)
-RX           ───►   USART1_TX (PA9)
+M0601C电机          STM32F407 (USART2 + THVD1410DR)
+────────────────────────────────────────────
+RS485_A      ───►   A (PD6, via THVD1410DR)
+RS485_B      ───►   B (PD5, via THVD1410DR)
 GND          ───►   GND
+RE/DE控制           PD3 (RE#), PD4 (DE)
+
+注意：USART2配置为RS485半双工，115200波特率
+      THVD1410DR: PD3=RE#(LOW=接收), PD4=DE(HIGH=发送)
 ```
 
 **NRF24L01+无线模块：**
@@ -1451,8 +1454,8 @@ int main(void) {
 
 | 参数 | 范围 | 单位 |
 |------|------|------|
-| p_des | -12.5 ~ 12.5 | rad |
-| v_des | -30 ~ 30 | rad/s |
+| p_des | -12.57 ~ 12.57 | rad |
+| v_des | -50 ~ 50 | rad/s |
 | kp | 0 ~ 500 | - |
 | kd | 0 ~ 5 | - |
 | t_ff | -6 ~ 6 | N·m |
@@ -1498,7 +1501,7 @@ int main(void) {
 | CAN通信失败 | 波特率不匹配 | 确认1Mbps设置 |
 | CAN总线错误 | 接线/终端电阻 | 检查`g_can_esr` (0=正常) |
 | 过热 | 负载过大 | 降低负载或占空比 |
-| UART无响应 | 引脚错误 | 检查PB7(RX)/PA9(TX) |
+| UART/RS485无响应 | 引脚错误 | 检查PD5(RX)/PD6(TX) (USART2 + THVD1410DR) |
 | CRC错误 | 信号干扰 | 检查线缆屏蔽 |
 
 ---
@@ -1514,8 +1517,8 @@ int main(void) {
 
 ## 参考资料
 
-- [EL05电机使用手册](Motor_Drivers/EL05_MOTOR_DRIVE/EL05电机驱动使用指南.md)
-- [NRF24L01+ 无线模块驱动](Motor_Drivers/NRF24L01_DRIVER/README.md)
+- [EL05电机使用手册](project/Core/Inc/el05_motor.h)
+- [NRF24L01+ 无线模块驱动](project/Core/Inc/nrf24l01_rx.h)
 - [STM32F407参考手册 (RM0090)](https://www.st.com/resource/en/reference_manual/dm00031051.pdf)
 - [CAN协议规范](https://www.can-cia.org/)
 
